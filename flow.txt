@@ -1,0 +1,7 @@
+sudo python3 tidycpu.py
+     │
+     ├─ [0] Root check (os.geteuid())
+     ├─ [1] Telemetry — dual /proc/stat snapshot (500ms delta) → HOT/WARM/COLD labels
+     ├─ [2] Top 5 PIDs via ps, affinity mask via taskset -p
+     ├─ [3] Conflict detection → Rebalancing Plan table
+     └─ [4] y/n prompt → taskset -pc to apply; catches errors → Manual Suggestion
