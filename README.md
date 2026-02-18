@@ -35,11 +35,100 @@ sudo apt install util-linux
 
 ## Usage
 
+### Standard Rebalance Mode
 ```bash
 sudo python3 tidycpu.py
 ```
 
-That's it — no arguments, no config files, no dependencies beyond stdlib.
+### Live Monitoring Mode (5 seconds, refreshing every 500ms)
+```bash
+sudo python3 tidycpu.py --live
+```
+
+### Live Monitoring with Custom Duration (10 seconds)
+```bash
+sudo python3 tidycpu.py --live --duration 10
+```
+
+### Monitor Specific Process and Its Threads
+```bash
+sudo python3 tidycpu.py --pid 1234
+```
+
+### Show Thread Information in Standard Mode
+```bash
+sudo python3 tidycpu.py --threads
+```
+
+### Command-Line Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--help` | `-h` | Show help message and exit |
+| `--live` | `-l` | Live monitoring mode (refreshes every 500ms) |
+| `--duration N` | `-d N` | Duration for live mode in seconds (default: 5) |
+| `--pid PID` | `-p PID` | Filter to show specific PID and its threads |
+| `--threads` | `-t` | Show thread information for processes |
+
+---
+
+## Features
+
+### 1. Physical/Logical CPU Topology View
+
+TidyCPU automatically detects and displays your system's CPU architecture:
+
+- **Physical CPUs** (sockets)
+- **Physical Cores** within each CPU
+- **Hyperthreading** detection (shows primary ⊲ and sibling ⊳ threads)
+- **Real-time usage** for each logical core
+
+Example output for a dual-socket system with hyperthreading:
+
+```
+  Physical CPU 0 (8 logical cores)
+    ├─ Core 0 (HT):
+       ⊲ CPU 0   95.2% ██████████████░  HOT
+       ⊳ CPU 1   88.1% █████████████░░  HOT
+    ├─ Core 1 (HT):
+       ⊲ CPU 2   72.4% ██████████░░░░░  WARM
+       ⊳ CPU 3   65.8% █████████░░░░░░  WARM
+```
+
+### 2. Live Monitoring Mode
+
+Watch CPU usage update in real-time with automatic screen refresh:
+
+```bash
+sudo python3 tidycpu.py --live --duration 10
+```
+
+- Refreshes every 500ms
+- Shows topology + top processes
+- Press Ctrl+C to exit early
+
+### 3. Thread-Level Analysis
+
+View individual threads within multi-threaded processes:
+
+```bash
+# Monitor all top processes with their threads
+sudo python3 tidycpu.py --threads
+
+# Focus on a specific process and its threads
+sudo python3 tidycpu.py --pid 5000
+```
+
+Example thread view:
+```
+  PID    Process                  CPU%   Cores
+  5000   my_multithreaded_app    67.3%   0,1
+   └─ Threads (4):
+      TID 5001  main_thread      25.3%  cores:[0,1]
+      TID 5002  worker_1         18.7%  cores:[0]
+      TID 5003  worker_2         15.2%  cores:[1]
+      TID 5004  io_handler        8.1%  cores:[0,1]
+```
 
 ---
 
@@ -86,6 +175,25 @@ If a process cannot be modified (kernel thread, permission denied, etc.), the er
 ## Sample Output
 
 ```
+  CPU TOPOLOGY
+  ──────────────────────────────────────────────────────────
+  Physical CPU 0 (8 logical cores)
+    ├─ Core 0 (HT):
+       ⊲ CPU 0   95.2% ██████████████░  HOT
+       ⊳ CPU 1   88.1% █████████████░░  HOT
+    ├─ Core 1 (HT):
+       ⊲ CPU 2   72.4% ██████████░░░░░  WARM
+       ⊳ CPU 3   65.8% █████████░░░░░░  WARM
+
+  Physical CPU 1 (8 logical cores)
+    ├─ Core 0 (HT):
+       ⊲ CPU 8    3.2% ░░░░░░░░░░░░░░░  COLD
+       ⊳ CPU 9    2.1% ░░░░░░░░░░░░░░░  COLD
+
+  Summary: 2 physical CPU(s), 8 physical core(s), 16 logical core(s)
+  Hyperthreading: Enabled (⊲ primary, ⊳ sibling)
+
+
   CORE TELEMETRY  (8 logical cores detected)
   ────────────────────────────────────────────────────────
   Core   Usage  Bar                     Status
@@ -145,21 +253,28 @@ If a process cannot be modified (kernel thread, permission denied, etc.), the er
 
 ```
 tidycpu.py
-├── C                     # ANSI color constants
-├── CoreStat              # Dataclass: core id, usage %, label, pids
-├── ProcessInfo           # Dataclass: pid, name, cpu%, cores, mask
-├── RebalanceAction       # Dataclass: from/to cores, manual flag, error
+├── C                         # ANSI color constants
+├── CPUTopology               # Dataclass: physical CPU, core, logical mapping
+├── CoreStat                  # Dataclass: core id, usage %, label, topology
+├── ThreadInfo                # Dataclass: thread id, parent, cpu%, cores
+├── ProcessInfo               # Dataclass: pid, name, cpu%, cores, threads
+├── RebalanceAction           # Dataclass: from/to cores, manual flag, error
 │
-├── check_root()          # Step 0 — privilege guard
-├── get_core_usage()      # Step 1 — /proc/stat delta sampling
-├── get_top_processes()   # Step 2 — ps + taskset -p per pid
-├── build_rebalance_plan()# Step 3 — conflict detection + plan
-├── apply_action()        # Step 4 — taskset -pc execution
+├── check_root()              # Step 0 — privilege guard
+├── get_cpu_topology()        # Parse /sys topology info (physical/logical)
+├── get_core_usage()          # Step 1 — /proc/stat delta sampling
+├── get_threads_for_pid()     # Thread-level analysis for specific PID
+├── get_top_processes()       # Step 2 — ps + taskset -p per pid + threads
+├── build_rebalance_plan()    # Step 3 — conflict detection + plan
+├── apply_action()            # Step 4 — taskset -pc execution
 │
-├── print_core_table()    # UI: core telemetry panel
-├── print_process_table() # UI: top consumers panel
-├── print_rebalance_plan()# UI: migration plan panel
-└── print_results()       # UI: execution results panel
+├── print_topology()          # UI: physical/logical CPU tree view
+├── print_core_table()        # UI: core telemetry panel
+├── print_process_table()     # UI: top consumers panel + optional threads
+├── print_rebalance_plan()    # UI: migration plan panel
+├── print_results()           # UI: execution results panel
+├── live_monitor()            # Live refresh mode with filtering
+└── main()                    # Argument parser + mode dispatcher
 ```
 
 ---

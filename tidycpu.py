@@ -12,8 +12,10 @@ import sys
 import re
 import subprocess
 import time
+import argparse
 from dataclasses import dataclass, field
 from typing import Optional
+from collections import defaultdict
 
 # ─────────────────────────────────────────────
 # ANSI Color Palette
@@ -36,11 +38,30 @@ class C:
 # Data Structures
 # ─────────────────────────────────────────────
 @dataclass
+class CPUTopology:
+    """Physical CPU topology info."""
+    physical_id:  int
+    core_id:      int
+    logical_id:   int
+    is_hyperthread: bool = False
+
+@dataclass
 class CoreStat:
     core_id:  int
     usage:    float   # 0.0 – 100.0 percent
     label:    str     # HOT / WARM / COLD
     pids:     list    = field(default_factory=list)
+    physical_id: Optional[int] = None
+    core_within_physical: Optional[int] = None
+
+@dataclass
+class ThreadInfo:
+    """Individual thread details."""
+    tid:          int
+    tgid:         int  # parent process group id
+    name:         str
+    cpu_percent:  float
+    current_cores: list[int]
 
 @dataclass
 class ProcessInfo:
@@ -49,6 +70,7 @@ class ProcessInfo:
     cpu_percent:  float
     current_cores: list[int]
     affinity_mask: str
+    threads:      list[ThreadInfo] = field(default_factory=list)
 
 @dataclass
 class RebalanceAction:
@@ -125,6 +147,52 @@ def check_root():
         )
 
 # ─────────────────────────────────────────────
+# CPU Topology Detection
+# ─────────────────────────────────────────────
+def get_cpu_topology() -> dict[int, CPUTopology]:
+    """
+    Parse /sys/devices/system/cpu/cpu*/topology to map logical cores
+    to physical CPUs and physical cores.
+    """
+    topology = {}
+    cpu_dirs = sorted(
+        [d for d in os.listdir("/sys/devices/system/cpu") if d.startswith("cpu") and d[3:].isdigit()],
+        key=lambda x: int(x[3:])
+    )
+    
+    for cpu_dir in cpu_dirs:
+        logical_id = int(cpu_dir[3:])
+        base = f"/sys/devices/system/cpu/{cpu_dir}/topology"
+        
+        try:
+            with open(f"{base}/physical_package_id") as f:
+                physical_id = int(f.read().strip())
+            with open(f"{base}/core_id") as f:
+                core_id = int(f.read().strip())
+            
+            # Check if this is a hyperthread sibling
+            with open(f"{base}/thread_siblings_list") as f:
+                siblings = parse_cpulist(f.read().strip())
+                is_hyperthread = len(siblings) > 1 and logical_id != min(siblings)
+            
+            topology[logical_id] = CPUTopology(
+                physical_id=physical_id,
+                core_id=core_id,
+                logical_id=logical_id,
+                is_hyperthread=is_hyperthread
+            )
+        except (FileNotFoundError, ValueError):
+            # Fallback for systems without topology info
+            topology[logical_id] = CPUTopology(
+                physical_id=0,
+                core_id=logical_id,
+                logical_id=logical_id,
+                is_hyperthread=False
+            )
+    
+    return topology
+
+# ─────────────────────────────────────────────
 # Step 1 – Telemetry: Read /proc/stat (two snapshots)
 # ─────────────────────────────────────────────
 def read_proc_stat() -> dict[int, dict]:
@@ -150,7 +218,7 @@ def read_proc_stat() -> dict[int, dict]:
         die("/proc/stat not found. Are you on Linux?")
     return cores
 
-def get_core_usage(sample_ms: int = 500) -> list[CoreStat]:
+def get_core_usage(sample_ms: int = 500, topology: Optional[dict] = None) -> list[CoreStat]:
     """Two-snapshot delta to calculate real per-core CPU %."""
     snap1 = read_proc_stat()
     time.sleep(sample_ms / 1000)
@@ -174,13 +242,82 @@ def get_core_usage(sample_ms: int = 500) -> list[CoreStat]:
         elif usage >= 40: label = "WARM"
         else:             label = "COLD"
 
-        stats.append(CoreStat(core_id=cid, usage=round(usage, 1), label=label))
+        phys_id = None
+        core_in_phys = None
+        if topology and cid in topology:
+            phys_id = topology[cid].physical_id
+            core_in_phys = topology[cid].core_id
+
+        stats.append(CoreStat(
+            core_id=cid, 
+            usage=round(usage, 1), 
+            label=label,
+            physical_id=phys_id,
+            core_within_physical=core_in_phys
+        ))
     return stats
 
 # ─────────────────────────────────────────────
 # Step 2 – Analysis: Top CPU Processes + Affinity
 # ─────────────────────────────────────────────
-def get_top_processes(n: int = 5, num_cores: int = 1) -> list[ProcessInfo]:
+def get_threads_for_pid(pid: int, num_cores: int = 1) -> list[ThreadInfo]:
+    """Get all threads for a specific PID with their CPU usage."""
+    threads = []
+    try:
+        # Read thread list from /proc/<pid>/task/
+        task_dir = f"/proc/{pid}/task"
+        if not os.path.exists(task_dir):
+            return threads
+        
+        for tid_str in os.listdir(task_dir):
+            if not tid_str.isdigit():
+                continue
+            tid = int(tid_str)
+            
+            try:
+                # Get thread name
+                with open(f"{task_dir}/{tid}/comm") as f:
+                    name = f.read().strip()[:24]
+                
+                # Get thread CPU usage from /proc/<pid>/task/<tid>/stat
+                with open(f"{task_dir}/{tid}/stat") as f:
+                    stat = f.read().strip()
+                    # stat format: pid (comm) state ... utime stime ...
+                    # We'll use ps for simplicity instead
+                    pass
+                
+                # Use ps to get thread-level CPU
+                rc, out, _ = run(["ps", "-p", str(tid), "-o", "pcpu", "--no-headers"])
+                cpu = 0.0
+                if rc == 0 and out:
+                    try:
+                        cpu = float(out.strip())
+                    except ValueError:
+                        pass
+                
+                # Get thread affinity
+                rc2, out2, _ = run(["taskset", "-p", str(tid)])
+                cur_cores = []
+                if rc2 == 0:
+                    m = re.search(r"current affinity mask:\s*([0-9a-fA-F,]+)", out2)
+                    if m:
+                        cur_cores = mask_to_cores(m.group(1), num_cores)
+                
+                threads.append(ThreadInfo(
+                    tid=tid,
+                    tgid=pid,
+                    name=name,
+                    cpu_percent=cpu,
+                    current_cores=cur_cores
+                ))
+            except (FileNotFoundError, PermissionError):
+                continue
+    except (FileNotFoundError, PermissionError):
+        pass
+    
+    return threads
+
+def get_top_processes(n: int = 5, num_cores: int = 1, with_threads: bool = False) -> list[ProcessInfo]:
     """Get top-N CPU-consuming processes with their core affinity."""
     # Use ps for a reliable snapshot (RSS fields)
     rc, out, err = run([
@@ -211,9 +348,14 @@ def get_top_processes(n: int = 5, num_cores: int = 1) -> list[ProcessInfo]:
             affinity_mask = m.group(1) if m else "N/A"
             cur_cores     = mask_to_cores(affinity_mask, num_cores) if m else []
 
+        threads = []
+        if with_threads:
+            threads = get_threads_for_pid(pid, num_cores)
+
         procs.append(ProcessInfo(
             pid=pid, name=name, cpu_percent=cpu,
-            current_cores=cur_cores, affinity_mask=affinity_mask
+            current_cores=cur_cores, affinity_mask=affinity_mask,
+            threads=threads
         ))
         if len(procs) == n:
             break
@@ -306,6 +448,68 @@ def label_color(label: str) -> str:
         "COLD": f"{C.CYAN}COLD{C.RESET}",
     }.get(label, label)
 
+def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat]):
+    """Print CPU topology showing physical CPUs and their logical cores."""
+    print(f"\n{C.BOLD}{'─'*78}{C.RESET}")
+    print(f"{C.BOLD}  CPU TOPOLOGY{C.RESET}")
+    print(f"{C.BOLD}{'─'*78}{C.RESET}")
+    
+    # Group by physical CPU
+    by_physical: dict[int, list] = defaultdict(list)
+    for logical_id, topo in sorted(topology.items()):
+        by_physical[topo.physical_id].append((logical_id, topo))
+    
+    # Create a lookup for core stats
+    stats_map = {cs.core_id: cs for cs in core_stats}
+    
+    for phys_id in sorted(by_physical.keys()):
+        cores = by_physical[phys_id]
+        print(f"\n  {C.MAGENTA}Physical CPU {phys_id}{C.RESET} ({len(cores)} logical cores)")
+        
+        # Group by physical core_id to show hyperthreads together
+        by_core: dict[int, list] = defaultdict(list)
+        for logical_id, topo in cores:
+            by_core[topo.core_id].append((logical_id, topo))
+        
+        for core_id in sorted(by_core.keys()):
+            logical_cores = by_core[core_id]
+            
+            if len(logical_cores) == 1:
+                # No hyperthreading
+                logical_id, topo = logical_cores[0]
+                stat = stats_map.get(logical_id)
+                usage = stat.usage if stat else 0.0
+                label = stat.label if stat else "N/A"
+                bar = usage_bar(usage, width=15)
+                
+                print(f"    ├─ Core {core_id}: {C.CYAN}CPU{logical_id:>2}{C.RESET}  "
+                      f"{usage:>5.1f}% {bar}  {label_color(label)}")
+            else:
+                # Hyperthreading enabled
+                print(f"    ├─ Core {core_id} (HT):")
+                for logical_id, topo in sorted(logical_cores):
+                    stat = stats_map.get(logical_id)
+                    usage = stat.usage if stat else 0.0
+                    label = stat.label if stat else "N/A"
+                    bar = usage_bar(usage, width=15)
+                    ht_mark = "⊳" if topo.is_hyperthread else "⊲"
+                    
+                    print(f"       {ht_mark} {C.CYAN}CPU{logical_id:>2}{C.RESET}  "
+                          f"{usage:>5.1f}% {bar}  {label_color(label)}")
+    
+    # Summary
+    total_physical = len(by_physical)
+    total_cores = sum(len(set(topo.core_id for _, topo in cores)) for cores in by_physical.values())
+    total_logical = len(topology)
+    ht_enabled = total_logical > total_cores
+    
+    print(f"\n  {C.DIM}Summary: {total_physical} physical CPU(s), "
+          f"{total_cores} physical core(s), {total_logical} logical core(s)")
+    if ht_enabled:
+        print(f"  Hyperthreading: {C.GREEN}Enabled{C.RESET}{C.DIM} (⊲ primary, ⊳ sibling){C.RESET}")
+    else:
+        print(f"  Hyperthreading: {C.DIM}Disabled{C.RESET}")
+
 def print_core_table(core_stats: list[CoreStat]):
     print(f"\n{C.BOLD}{'─'*62}{C.RESET}")
     print(f"{C.BOLD}  CORE TELEMETRY  ({len(core_stats)} logical cores detected){C.RESET}")
@@ -326,7 +530,7 @@ def print_core_table(core_stats: list[CoreStat]):
           f"{C.YELLOW}●{C.RESET} {warm} Warm  "
           f"{C.CYAN}●{C.RESET} {cold} Cold")
 
-def print_process_table(processes: list[ProcessInfo]):
+def print_process_table(processes: list[ProcessInfo], show_threads: bool = False):
     print(f"\n{C.BOLD}{'─'*62}{C.RESET}")
     print(f"{C.BOLD}  TOP CPU CONSUMERS{C.RESET}")
     print(f"{C.BOLD}{'─'*62}{C.RESET}")
@@ -341,6 +545,94 @@ def print_process_table(processes: list[ProcessInfo]):
             f"{C.DIM}{p.affinity_mask:>14}{C.RESET}  "
             f"{cores_str}"
         )
+        
+        # Show threads if requested and available
+        if show_threads and p.threads:
+            print(f"  {C.DIM}   └─ Threads ({len(p.threads)}):{C.RESET}")
+            for t in p.threads[:10]:  # Show max 10 threads
+                t_cores_str = ",".join(map(str, t.current_cores)) if t.current_cores else "all"
+                print(
+                    f"  {C.DIM}      TID {t.tid:>7}  "
+                    f"{t.name:<20}  "
+                    f"{t.cpu_percent:>4.1f}%  "
+                    f"cores:[{t_cores_str}]{C.RESET}"
+                )
+            if len(p.threads) > 10:
+                print(f"  {C.DIM}      ... {len(p.threads) - 10} more threads{C.RESET}")
+
+def clear_screen():
+    """Clear terminal screen."""
+    os.system('clear' if os.name != 'nt' else 'cls')
+
+def live_monitor(duration_sec: int = 5, interval_ms: int = 500, filter_pid: Optional[int] = None):
+    """
+    Live monitoring mode - refresh stats every interval for duration seconds.
+    If filter_pid is set, only show threads for that specific PID.
+    """
+    topology = get_cpu_topology()
+    num_cores = len(topology)
+    
+    iterations = int(duration_sec * 1000 / interval_ms)
+    
+    for i in range(iterations):
+        clear_screen()
+        print(BANNER)
+        print(f"\n  {C.CYAN}Live Monitor Mode{C.RESET} — {C.DIM}Refresh: {interval_ms}ms  "
+              f"Iteration: {i+1}/{iterations}{C.RESET}")
+        
+        # Get current stats
+        core_stats = get_core_usage(sample_ms=interval_ms, topology=topology)
+        
+        if filter_pid:
+            # Show only the specific PID and its threads
+            print(f"\n  {C.YELLOW}Filtering: PID {filter_pid}{C.RESET}")
+            processes = []
+            
+            # Try to get this specific process
+            rc, out, _ = run(["ps", "-p", str(filter_pid), "-o", "pid,pcpu,comm", "--no-headers"])
+            if rc == 0 and out:
+                parts = out.strip().split(None, 2)
+                if len(parts) >= 3:
+                    try:
+                        pid = int(parts[0])
+                        cpu = float(parts[1])
+                        name = parts[2].strip()[:24]
+                        
+                        rc2, out2, _ = run(["taskset", "-p", str(pid)])
+                        affinity_mask = "N/A"
+                        cur_cores = []
+                        if rc2 == 0:
+                            m = re.search(r"current affinity mask:\s*([0-9a-fA-F,]+)", out2)
+                            if m:
+                                affinity_mask = m.group(1)
+                                cur_cores = mask_to_cores(affinity_mask, num_cores)
+                        
+                        threads = get_threads_for_pid(pid, num_cores)
+                        processes.append(ProcessInfo(
+                            pid=pid, name=name, cpu_percent=cpu,
+                            current_cores=cur_cores, affinity_mask=affinity_mask,
+                            threads=threads
+                        ))
+                    except ValueError:
+                        pass
+            
+            if not processes:
+                print(f"  {C.RED}✘ PID {filter_pid} not found or inaccessible{C.RESET}")
+            else:
+                print_topology(topology, core_stats)
+                print_process_table(processes, show_threads=True)
+        else:
+            # Normal top-N display
+            processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
+            print_topology(topology, core_stats)
+            print_process_table(processes, show_threads=False)
+        
+        print(f"\n  {C.DIM}Press Ctrl+C to exit{C.RESET}")
+        
+        if i < iterations - 1:
+            time.sleep(interval_ms / 1000)
+    
+    print(f"\n  {C.GREEN}Live monitoring complete.{C.RESET}\n")
 
 def print_rebalance_plan(actions: list[RebalanceAction]):
     print(f"\n{C.BOLD}{'─'*62}{C.RESET}")
@@ -394,26 +686,79 @@ def print_results(actions: list[RebalanceAction]):
 # Main
 # ─────────────────────────────────────────────
 def main():
+    parser = argparse.ArgumentParser(
+        description="TidyCPU — CPU Affinity Optimization Utility",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  sudo python3 tidycpu.py                    # Standard rebalance mode
+  sudo python3 tidycpu.py --live             # Live monitor (5 seconds)
+  sudo python3 tidycpu.py --live --duration 10  # Live monitor (10 seconds)
+  sudo python3 tidycpu.py --pid 1234         # Monitor specific process with threads
+  sudo python3 tidycpu.py --pid 1234 --threads  # Show threads in standard mode
+        """
+    )
+    parser.add_argument(
+        "--live", "-l",
+        action="store_true",
+        help="Live monitoring mode (refreshes every 500ms)"
+    )
+    parser.add_argument(
+        "--duration", "-d",
+        type=int,
+        default=5,
+        help="Duration for live mode in seconds (default: 5)"
+    )
+    parser.add_argument(
+        "--pid", "-p",
+        type=int,
+        help="Filter to show specific PID and its threads"
+    )
+    parser.add_argument(
+        "--threads", "-t",
+        action="store_true",
+        help="Show thread information for processes"
+    )
+    
+    args = parser.parse_args()
+    
     print(BANNER)
 
     # ── Privilege guard ──────────────────────
     check_root()
     print(f"  {C.GREEN}✔{C.RESET}  Running as root.\n")
 
+    # ── Get topology ─────────────────────────
+    topology = get_cpu_topology()
+    num_cores = len(topology)
+
+    # ── Live monitor mode ────────────────────
+    if args.live or args.pid:
+        try:
+            live_monitor(
+                duration_sec=args.duration,
+                interval_ms=500,
+                filter_pid=args.pid
+            )
+        except KeyboardInterrupt:
+            print(f"\n\n  {C.YELLOW}Monitoring interrupted.{C.RESET}\n")
+        return
+
+    # ── Standard rebalance mode ──────────────
     # ── 1. Telemetry ─────────────────────────
     print(f"  {C.CYAN}○{C.RESET}  Sampling core usage (500 ms) …", end="", flush=True)
-    core_stats = get_core_usage(sample_ms=500)
-    num_cores  = len(core_stats)
+    core_stats = get_core_usage(sample_ms=500, topology=topology)
     print(f"\r  {C.GREEN}✔{C.RESET}  Core telemetry collected.          ")
 
+    print_topology(topology, core_stats)
     print_core_table(core_stats)
 
     # ── 2. Top processes + affinity ───────────
     print(f"\n  {C.CYAN}○{C.RESET}  Identifying top CPU consumers …", end="", flush=True)
-    processes = get_top_processes(n=5, num_cores=num_cores)
+    processes = get_top_processes(n=5, num_cores=num_cores, with_threads=args.threads)
     print(f"\r  {C.GREEN}✔{C.RESET}  Process snapshot ready.            ")
 
-    print_process_table(processes)
+    print_process_table(processes, show_threads=args.threads)
 
     # ── 3. Conflict detection + plan ─────────
     actions = build_rebalance_plan(core_stats, processes)
