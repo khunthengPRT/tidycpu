@@ -16,6 +16,7 @@ import argparse
 from dataclasses import dataclass, field
 from typing import Optional
 from collections import defaultdict
+from datetime import datetime
 
 # ─────────────────────────────────────────────
 # ANSI Color Palette
@@ -44,6 +45,17 @@ class CPUTopology:
     core_id:      int
     logical_id:   int
     is_hyperthread: bool = False
+
+@dataclass
+class SystemInfo:
+    """System-wide hardware information."""
+    cpu_model:     str
+    total_memory:  str  # e.g., "15.6 GiB"
+    available_memory: str
+    kernel_cmdline: str
+    cpu_freq_min:  Optional[float] = None  # MHz
+    cpu_freq_max:  Optional[float] = None  # MHz
+    cpu_freq_cur:  Optional[float] = None  # MHz
 
 @dataclass
 class CoreStat:
@@ -145,6 +157,87 @@ def check_root():
             "TidyCPU requires root privileges.\n"
             f"  {C.YELLOW}Re-run with: sudo python3 tidycpu.py{C.RESET}"
         )
+
+# ─────────────────────────────────────────────
+# System Information Collection
+# ─────────────────────────────────────────────
+def get_system_info(show_cpu_freq: bool = False) -> SystemInfo:
+    """
+    Collect system-wide hardware information.
+    """
+    # CPU Model from /proc/cpuinfo
+    cpu_model = "Unknown"
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    cpu_model = line.split(":", 1)[1].strip()
+                    break
+    except FileNotFoundError:
+        pass
+    
+    # Memory info from /proc/meminfo
+    total_mem = "Unknown"
+    avail_mem = "Unknown"
+    try:
+        with open("/proc/meminfo") as f:
+            meminfo = {}
+            for line in f:
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    key = parts[0].strip()
+                    value = parts[1].strip().split()[0]  # Get numeric part
+                    meminfo[key] = int(value)
+            
+            if "MemTotal" in meminfo:
+                total_kb = meminfo["MemTotal"]
+                total_mem = f"{total_kb / 1024 / 1024:.1f} GiB"
+            
+            if "MemAvailable" in meminfo:
+                avail_kb = meminfo["MemAvailable"]
+                avail_mem = f"{avail_kb / 1024 / 1024:.1f} GiB"
+    except (FileNotFoundError, ValueError):
+        pass
+    
+    # Kernel command line
+    cmdline = "Unknown"
+    try:
+        with open("/proc/cmdline") as f:
+            cmdline = f.read().strip()
+    except FileNotFoundError:
+        pass
+    
+    # CPU frequency info (optional)
+    freq_min, freq_max, freq_cur = None, None, None
+    if show_cpu_freq:
+        try:
+            # Try cpufreq interface for CPU0
+            with open("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq") as f:
+                freq_min = int(f.read().strip()) / 1000  # Convert kHz to MHz
+            with open("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq") as f:
+                freq_max = int(f.read().strip()) / 1000
+            with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") as f:
+                freq_cur = int(f.read().strip()) / 1000
+        except (FileNotFoundError, ValueError, PermissionError):
+            # Fallback: try to get from cpuinfo
+            try:
+                with open("/proc/cpuinfo") as f:
+                    for line in f:
+                        if line.startswith("cpu MHz"):
+                            freq_cur = float(line.split(":", 1)[1].strip())
+                            break
+            except (FileNotFoundError, ValueError):
+                pass
+    
+    return SystemInfo(
+        cpu_model=cpu_model,
+        total_memory=total_mem,
+        available_memory=avail_mem,
+        kernel_cmdline=cmdline,
+        cpu_freq_min=freq_min,
+        cpu_freq_max=freq_max,
+        cpu_freq_cur=freq_cur
+    )
 
 # ─────────────────────────────────────────────
 # CPU Topology Detection
@@ -448,87 +541,131 @@ def label_color(label: str) -> str:
         "COLD": f"{C.CYAN}COLD{C.RESET}",
     }.get(label, label)
 
+def print_system_info(sysinfo: SystemInfo):
+    """Print system hardware information."""
+    print(f"\n{C.BOLD}{'─'*78}{C.RESET}")
+    print(f"{C.BOLD}  SYSTEM INFORMATION{C.RESET}")
+    print(f"{C.BOLD}{'─'*78}{C.RESET}")
+    
+    # CPU Model
+    print(f"  {C.CYAN}CPU Model:{C.RESET}")
+    print(f"    {sysinfo.cpu_model}")
+    
+    # Memory
+    print(f"\n  {C.CYAN}Memory:{C.RESET}")
+    print(f"    Total:     {C.GREEN}{sysinfo.total_memory}{C.RESET}")
+    print(f"    Available: {C.GREEN}{sysinfo.available_memory}{C.RESET}")
+    
+    # CPU Frequency (if available)
+    if sysinfo.cpu_freq_cur is not None:
+        print(f"\n  {C.CYAN}CPU Frequency:{C.RESET}")
+        if sysinfo.cpu_freq_min and sysinfo.cpu_freq_max:
+            print(f"    Range:   {sysinfo.cpu_freq_min:.0f} MHz - {sysinfo.cpu_freq_max:.0f} MHz")
+        print(f"    Current: {C.YELLOW}{sysinfo.cpu_freq_cur:.0f} MHz{C.RESET}")
+    
+    # Kernel Command Line
+    print(f"\n  {C.CYAN}Kernel Command Line:{C.RESET}")
+    # Wrap long cmdline for readability
+    cmdline = sysinfo.kernel_cmdline
+    if len(cmdline) > 72:
+        # Split by spaces and wrap
+        words = cmdline.split()
+        lines = []
+        current_line = "    "
+        for word in words:
+            if len(current_line) + len(word) + 1 > 78:
+                lines.append(current_line)
+                current_line = "    " + word
+            else:
+                current_line += (" " if len(current_line) > 4 else "") + word
+        if current_line.strip():
+            lines.append(current_line)
+        for line in lines:
+            print(f"{C.DIM}{line}{C.RESET}")
+    else:
+        print(f"    {C.DIM}{cmdline}{C.RESET}")
+
 def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat]):
-    """Print CPU topology showing physical CPUs and their logical cores."""
+    """Print CPU topology in compact two-column layout."""
     print(f"\n{C.BOLD}{'─'*78}{C.RESET}")
     print(f"{C.BOLD}  CPU TOPOLOGY{C.RESET}")
     print(f"{C.BOLD}{'─'*78}{C.RESET}")
     
-    # Group by physical CPU
-    by_physical: dict[int, list] = defaultdict(list)
-    for logical_id, topo in sorted(topology.items()):
-        by_physical[topo.physical_id].append((logical_id, topo))
-    
     # Create a lookup for core stats
     stats_map = {cs.core_id: cs for cs in core_stats}
+    total_cores = len(topology)
     
-    for phys_id in sorted(by_physical.keys()):
-        cores = by_physical[phys_id]
-        print(f"\n  {C.MAGENTA}Physical CPU {phys_id}{C.RESET} ({len(cores)} logical cores)")
+    # Determine column split
+    left_count = (total_cores + 1) // 2  # Round up for left column
+    
+    # Header with perfect alignment
+    print(f"\n  {'Core':<6} {'Usage':>6}  {'Bar':<22}  {'Status':<6}  "
+          f"{'Core':<6} {'Usage':>6}  {'Bar':<22}  {'Status':<6}")
+    print(f"  {'────':<6} {'─────':>6}  {'──────────────────────':<22}  {'──────':<6}  "
+          f"{'────':<6} {'─────':>6}  {'──────────────────────':<22}  {'──────':<6}")
+    
+    for i in range(left_count):
+        left_id = i
+        right_id = i + left_count
         
-        # Group by physical core_id to show hyperthreads together
-        by_core: dict[int, list] = defaultdict(list)
-        for logical_id, topo in cores:
-            by_core[topo.core_id].append((logical_id, topo))
+        # Left column
+        if left_id in stats_map:
+            cs_left = stats_map[left_id]
+            # Use fixed-width formatting for core name
+            core_name_left = f"CPU{cs_left.core_id}"
+            left_line = (
+                f"  {C.DIM}{core_name_left:<6}{C.RESET} "
+                f"{cs_left.usage:>5.1f}%  "
+                f"{usage_bar(cs_left.usage, width=22)}  "
+                f"{label_color(cs_left.label):<6}"
+            )
+        else:
+            left_line = " " * 50
         
-        for core_id in sorted(by_core.keys()):
-            logical_cores = by_core[core_id]
-            
-            if len(logical_cores) == 1:
-                # No hyperthreading
-                logical_id, topo = logical_cores[0]
-                stat = stats_map.get(logical_id)
-                usage = stat.usage if stat else 0.0
-                label = stat.label if stat else "N/A"
-                bar = usage_bar(usage, width=15)
-                
-                print(f"    ├─ Core {core_id}: {C.CYAN}CPU{logical_id:>2}{C.RESET}  "
-                      f"{usage:>5.1f}% {bar}  {label_color(label)}")
-            else:
-                # Hyperthreading enabled
-                print(f"    ├─ Core {core_id} (HT):")
-                for logical_id, topo in sorted(logical_cores):
-                    stat = stats_map.get(logical_id)
-                    usage = stat.usage if stat else 0.0
-                    label = stat.label if stat else "N/A"
-                    bar = usage_bar(usage, width=15)
-                    ht_mark = "⊳" if topo.is_hyperthread else "⊲"
-                    
-                    print(f"       {ht_mark} {C.CYAN}CPU{logical_id:>2}{C.RESET}  "
-                          f"{usage:>5.1f}% {bar}  {label_color(label)}")
+        # Right column
+        if right_id < total_cores and right_id in stats_map:
+            cs_right = stats_map[right_id]
+            core_name_right = f"CPU{cs_right.core_id}"
+            right_line = (
+                f"  {C.DIM}{core_name_right:<6}{C.RESET} "
+                f"{cs_right.usage:>5.1f}%  "
+                f"{usage_bar(cs_right.usage, width=22)}  "
+                f"{label_color(cs_right.label):<6}"
+            )
+        else:
+            right_line = ""
+        
+        print(left_line + right_line)
     
     # Summary
-    total_physical = len(by_physical)
-    total_cores = sum(len(set(topo.core_id for _, topo in cores)) for cores in by_physical.values())
-    total_logical = len(topology)
-    ht_enabled = total_logical > total_cores
-    
-    print(f"\n  {C.DIM}Summary: {total_physical} physical CPU(s), "
-          f"{total_cores} physical core(s), {total_logical} logical core(s)")
-    if ht_enabled:
-        print(f"  Hyperthreading: {C.GREEN}Enabled{C.RESET}{C.DIM} (⊲ primary, ⊳ sibling){C.RESET}")
-    else:
-        print(f"  Hyperthreading: {C.DIM}Disabled{C.RESET}")
-
-def print_core_table(core_stats: list[CoreStat]):
-    print(f"\n{C.BOLD}{'─'*62}{C.RESET}")
-    print(f"{C.BOLD}  CORE TELEMETRY  ({len(core_stats)} logical cores detected){C.RESET}")
-    print(f"{C.BOLD}{'─'*62}{C.RESET}")
-    print(f"  {'Core':>4}  {'Usage':>6}  {'Bar':<22}  {'Status'}")
-    print(f"  {'────':>4}  {'─────':>6}  {'──────────────────────':<22}  {'──────'}")
-    for cs in core_stats:
-        print(
-            f"  {C.DIM}CPU{C.RESET}{cs.core_id:>1}  "
-            f"{cs.usage:>5.1f}%  "
-            f"{usage_bar(cs.usage):<22}  "
-            f"{label_color(cs.label)}"
-        )
     hot  = sum(1 for c in core_stats if c.label == "HOT")
     cold = sum(1 for c in core_stats if c.label == "COLD")
     warm = sum(1 for c in core_stats if c.label == "WARM")
+    
+    # Topology summary (physical CPUs, HT info)
+    by_physical = {}
+    for logical_id, topo in topology.items():
+        if topo.physical_id not in by_physical:
+            by_physical[topo.physical_id] = []
+        by_physical[topo.physical_id].append(topo)
+    
+    total_physical = len(by_physical)
+    total_physical_cores = sum(
+        len(set(t.core_id for t in cores)) for cores in by_physical.values()
+    )
+    ht_enabled = total_cores > total_physical_cores
+    
     print(f"\n  Summary: {C.RED}●{C.RESET} {hot} Hot  "
           f"{C.YELLOW}●{C.RESET} {warm} Warm  "
-          f"{C.CYAN}●{C.RESET} {cold} Cold")
+          f"{C.CYAN}●{C.RESET} {cold} Cold  {C.DIM}|{C.RESET}  "
+          f"{total_physical} physical CPU(s), "
+          f"{total_physical_cores} physical core(s), "
+          f"{total_cores} logical core(s)")
+    
+    if ht_enabled:
+        print(f"  Hyperthreading: {C.GREEN}Enabled{C.RESET}")
+    else:
+        print(f"  Hyperthreading: {C.DIM}Disabled{C.RESET}")
 
 def print_process_table(processes: list[ProcessInfo], show_threads: bool = False):
     print(f"\n{C.BOLD}{'─'*62}{C.RESET}")
@@ -564,7 +701,7 @@ def clear_screen():
     """Clear terminal screen."""
     os.system('clear' if os.name != 'nt' else 'cls')
 
-def live_monitor(duration_sec: int = 5, interval_ms: int = 500, filter_pid: Optional[int] = None):
+def live_monitor(duration_sec: int = 5, interval_ms: int = 500, filter_pid: Optional[int] = None, show_cpu_freq: bool = False):
     """
     Live monitoring mode - refresh stats every interval for duration seconds.
     If filter_pid is set, only show threads for that specific PID.
@@ -577,6 +714,12 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 500, filter_pid: Opti
     for i in range(iterations):
         clear_screen()
         print(BANNER)
+        
+        # Show system info on first iteration
+        if i == 0:
+            sysinfo = get_system_info(show_cpu_freq=show_cpu_freq)
+            print_system_info(sysinfo)
+        
         print(f"\n  {C.CYAN}Live Monitor Mode{C.RESET} — {C.DIM}Refresh: {interval_ms}ms  "
               f"Iteration: {i+1}/{iterations}{C.RESET}")
         
@@ -683,6 +826,432 @@ def print_results(actions: list[RebalanceAction]):
             )
 
 # ─────────────────────────────────────────────
+# Export Functions
+# ─────────────────────────────────────────────
+def export_to_html(
+    sysinfo: SystemInfo,
+    topology: dict[int, CPUTopology],
+    core_stats: list[CoreStat],
+    processes: list[ProcessInfo],
+    filename: str = "tidycpu_report.html"
+):
+    """Export current state to HTML file with styling."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Build HTML content
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>TidyCPU Report - {timestamp}</title>
+    <style>
+        body {{
+            font-family: 'Consolas', 'Monaco', monospace;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            line-height: 1.6;
+        }}
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+        }}
+        h1 {{
+            color: #4fc3f7;
+            border-bottom: 2px solid #4fc3f7;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #81c784;
+            margin-top: 30px;
+        }}
+        .section {{
+            background: #252526;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 5px;
+            border-left: 4px solid #4fc3f7;
+        }}
+        .info-grid {{
+            display: grid;
+            grid-template-columns: 200px 1fr;
+            gap: 10px;
+            margin: 10px 0;
+        }}
+        .label {{
+            color: #4fc3f7;
+            font-weight: bold;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            font-size: 14px;
+        }}
+        th {{
+            background: #2d2d30;
+            color: #4fc3f7;
+            padding: 10px;
+            text-align: left;
+            border-bottom: 2px solid #4fc3f7;
+        }}
+        td {{
+            padding: 8px 10px;
+            border-bottom: 1px solid #3e3e42;
+        }}
+        tr:hover {{
+            background: #2d2d30;
+        }}
+        .bar {{
+            background: #3e3e42;
+            height: 20px;
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }}
+        .bar-fill {{
+            height: 100%;
+            transition: width 0.3s;
+        }}
+        .bar-fill.hot {{ background: #f44336; }}
+        .bar-fill.warm {{ background: #ff9800; }}
+        .bar-fill.cold {{ background: #4caf50; }}
+        .status {{
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-weight: bold;
+            font-size: 12px;
+        }}
+        .status.hot {{ background: #f44336; color: white; }}
+        .status.warm {{ background: #ff9800; color: white; }}
+        .status.cold {{ background: #4caf50; color: white; }}
+        .summary {{
+            display: flex;
+            gap: 20px;
+            margin: 15px 0;
+            flex-wrap: wrap;
+        }}
+        .summary-item {{
+            background: #2d2d30;
+            padding: 10px 15px;
+            border-radius: 5px;
+        }}
+        .dot {{
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }}
+        .dot.hot {{ background: #f44336; }}
+        .dot.warm {{ background: #ff9800; }}
+        .dot.cold {{ background: #4caf50; }}
+        .timestamp {{
+            color: #858585;
+            font-size: 12px;
+        }}
+        .two-column {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TidyCPU — CPU Affinity Optimization Report</h1>
+        <p class="timestamp">Generated: {timestamp}</p>
+"""
+    
+    # System Information
+    html += """
+        <div class="section">
+            <h2>System Information</h2>
+            <div class="info-grid">
+                <div class="label">CPU Model:</div>
+                <div>{}</div>
+                <div class="label">Total Memory:</div>
+                <div>{}</div>
+                <div class="label">Available Memory:</div>
+                <div>{}</div>
+""".format(sysinfo.cpu_model, sysinfo.total_memory, sysinfo.available_memory)
+    
+    if sysinfo.cpu_freq_cur:
+        html += f"""
+                <div class="label">CPU Frequency:</div>
+                <div>{sysinfo.cpu_freq_min:.0f} MHz - {sysinfo.cpu_freq_max:.0f} MHz (Current: {sysinfo.cpu_freq_cur:.0f} MHz)</div>
+"""
+    
+    html += f"""
+                <div class="label">Kernel Cmdline:</div>
+                <div style="word-break: break-all;">{sysinfo.kernel_cmdline}</div>
+            </div>
+        </div>
+"""
+    
+    # CPU Topology
+    stats_map = {cs.core_id: cs for cs in core_stats}
+    total_cores = len(topology)
+    left_count = (total_cores + 1) // 2
+    
+    hot_count = sum(1 for c in core_stats if c.label == "HOT")
+    warm_count = sum(1 for c in core_stats if c.label == "WARM")
+    cold_count = sum(1 for c in core_stats if c.label == "COLD")
+    
+    by_physical = {}
+    for logical_id, topo in topology.items():
+        if topo.physical_id not in by_physical:
+            by_physical[topo.physical_id] = []
+        by_physical[topo.physical_id].append(topo)
+    
+    total_physical = len(by_physical)
+    total_physical_cores = sum(len(set(t.core_id for t in cores)) for cores in by_physical.values())
+    ht_enabled = total_cores > total_physical_cores
+    
+    html += """
+        <div class="section">
+            <h2>CPU Topology</h2>
+            <div class="summary">
+                <div class="summary-item"><span class="dot hot"></span>{} Hot Cores</div>
+                <div class="summary-item"><span class="dot warm"></span>{} Warm Cores</div>
+                <div class="summary-item"><span class="dot cold"></span>{} Cold Cores</div>
+                <div class="summary-item">{} Physical CPU(s)</div>
+                <div class="summary-item">{} Physical Cores</div>
+                <div class="summary-item">{} Logical Cores</div>
+                <div class="summary-item">Hyperthreading: {}</div>
+            </div>
+            <div class="two-column">
+""".format(hot_count, warm_count, cold_count, total_physical, total_physical_cores, 
+           total_cores, "Enabled" if ht_enabled else "Disabled")
+    
+    # Left column table
+    html += """
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Core</th>
+                            <th>Usage</th>
+                            <th>Bar</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+    
+    for i in range(left_count):
+        if i in stats_map:
+            cs = stats_map[i]
+            label_class = cs.label.lower()
+            html += f"""
+                        <tr>
+                            <td>CPU{cs.core_id}</td>
+                            <td>{cs.usage:.1f}%</td>
+                            <td>
+                                <div class="bar">
+                                    <div class="bar-fill {label_class}" style="width: {cs.usage}%"></div>
+                                </div>
+                            </td>
+                            <td><span class="status {label_class}">{cs.label}</span></td>
+                        </tr>
+"""
+    
+    html += """
+                    </tbody>
+                </table>
+"""
+    
+    # Right column table
+    html += """
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Core</th>
+                            <th>Usage</th>
+                            <th>Bar</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+    
+    for i in range(left_count):
+        right_id = i + left_count
+        if right_id < total_cores and right_id in stats_map:
+            cs = stats_map[right_id]
+            label_class = cs.label.lower()
+            html += f"""
+                        <tr>
+                            <td>CPU{cs.core_id}</td>
+                            <td>{cs.usage:.1f}%</td>
+                            <td>
+                                <div class="bar">
+                                    <div class="bar-fill {label_class}" style="width: {cs.usage}%"></div>
+                                </div>
+                            </td>
+                            <td><span class="status {label_class}">{cs.label}</span></td>
+                        </tr>
+"""
+    
+    html += """
+                    </tbody>
+                </table>
+            </div>
+        </div>
+"""
+    
+    # Top Processes
+    if processes:
+        html += """
+        <div class="section">
+            <h2>Top CPU Consumers</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>PID</th>
+                        <th>Process</th>
+                        <th>CPU %</th>
+                        <th>Affinity Mask</th>
+                        <th>Cores</th>
+                    </tr>
+                </thead>
+                <tbody>
+"""
+        for p in processes:
+            cores_str = ",".join(map(str, p.current_cores)) if p.current_cores else "all"
+            html += f"""
+                    <tr>
+                        <td>{p.pid}</td>
+                        <td>{p.name}</td>
+                        <td>{p.cpu_percent:.1f}%</td>
+                        <td>{p.affinity_mask}</td>
+                        <td>{cores_str}</td>
+                    </tr>
+"""
+        
+        html += """
+                </tbody>
+            </table>
+        </div>
+"""
+    
+    html += """
+    </div>
+</body>
+</html>
+"""
+    
+    with open(filename, 'w') as f:
+        f.write(html)
+    
+    return filename
+
+def export_to_text(
+    sysinfo: SystemInfo,
+    topology: dict[int, CPUTopology],
+    core_stats: list[CoreStat],
+    processes: list[ProcessInfo],
+    filename: str = "tidycpu_report.txt"
+):
+    """Export current state to text file with ANSI color codes preserved."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    output = []
+    output.append("=" * 78)
+    output.append("TidyCPU — CPU Affinity Optimization Report")
+    output.append(f"Generated: {timestamp}")
+    output.append("=" * 78)
+    output.append("")
+    
+    # System Information
+    output.append("SYSTEM INFORMATION")
+    output.append("-" * 78)
+    output.append(f"CPU Model:       {sysinfo.cpu_model}")
+    output.append(f"Total Memory:    {sysinfo.total_memory}")
+    output.append(f"Available Memory: {sysinfo.available_memory}")
+    
+    if sysinfo.cpu_freq_cur:
+        output.append(f"CPU Frequency:   {sysinfo.cpu_freq_min:.0f} MHz - {sysinfo.cpu_freq_max:.0f} MHz")
+        output.append(f"                 (Current: {sysinfo.cpu_freq_cur:.0f} MHz)")
+    
+    output.append(f"Kernel Cmdline:  {sysinfo.kernel_cmdline}")
+    output.append("")
+    
+    # CPU Topology
+    stats_map = {cs.core_id: cs for cs in core_stats}
+    total_cores = len(topology)
+    left_count = (total_cores + 1) // 2
+    
+    hot_count = sum(1 for c in core_stats if c.label == "HOT")
+    warm_count = sum(1 for c in core_stats if c.label == "WARM")
+    cold_count = sum(1 for c in core_stats if c.label == "COLD")
+    
+    by_physical = {}
+    for logical_id, topo in topology.items():
+        if topo.physical_id not in by_physical:
+            by_physical[topo.physical_id] = []
+        by_physical[topo.physical_id].append(topo)
+    
+    total_physical = len(by_physical)
+    total_physical_cores = sum(len(set(t.core_id for t in cores)) for cores in by_physical.values())
+    ht_enabled = total_cores > total_physical_cores
+    
+    output.append("CPU TOPOLOGY")
+    output.append("-" * 78)
+    output.append(f"  Core    Usage  Bar                     Status  "
+                  f"Core    Usage  Bar                     Status")
+    output.append(f"  ────    ─────  ──────────────────────  ──────  "
+                  f"────    ─────  ──────────────────────  ──────")
+    
+    for i in range(left_count):
+        left_id = i
+        right_id = i + left_count
+        
+        # Left column
+        if left_id in stats_map:
+            cs_left = stats_map[left_id]
+            bar_left = '█' * int(cs_left.usage / 100 * 22) + '░' * (22 - int(cs_left.usage / 100 * 22))
+            left_line = f"  CPU{cs_left.core_id:<3} {cs_left.usage:>5.1f}%  {bar_left}  {cs_left.label:<6}"
+        else:
+            left_line = " " * 44
+        
+        # Right column
+        if right_id < total_cores and right_id in stats_map:
+            cs_right = stats_map[right_id]
+            bar_right = '█' * int(cs_right.usage / 100 * 22) + '░' * (22 - int(cs_right.usage / 100 * 22))
+            right_line = f"  CPU{cs_right.core_id:<3} {cs_right.usage:>5.1f}%  {bar_right}  {cs_right.label:<6}"
+        else:
+            right_line = ""
+        
+        output.append(left_line + right_line)
+    
+    output.append("")
+    output.append(f"Summary: ● {hot_count} Hot  ● {warm_count} Warm  ● {cold_count} Cold  |  "
+                  f"{total_physical} physical CPU(s), {total_physical_cores} physical core(s), "
+                  f"{total_cores} logical core(s)")
+    output.append(f"Hyperthreading: {'Enabled' if ht_enabled else 'Disabled'}")
+    output.append("")
+    
+    # Top Processes
+    if processes:
+        output.append("TOP CPU CONSUMERS")
+        output.append("-" * 78)
+        output.append(f"  {'PID':>7}  {'Process':<24}  {'CPU%':>6}  {'Affinity Mask':>14}  Cores")
+        output.append(f"  {'───────':>7}  {'────────────────────────':<24}  {'─────':>6}  {'──────────────':>14}  ─────")
+        
+        for p in processes:
+            cores_str = ",".join(map(str, p.current_cores)) if p.current_cores else "all"
+            output.append(f"  {p.pid:>7}  {p.name:<24}  {p.cpu_percent:>5.1f}%  {p.affinity_mask:>14}  {cores_str}")
+        
+        output.append("")
+    
+    output.append("=" * 78)
+    
+    with open(filename, 'w') as f:
+        f.write('\n'.join(output))
+    
+    return filename
+
+# ─────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────
 def main():
@@ -696,6 +1265,7 @@ Examples:
   sudo python3 tidycpu.py --live --duration 10  # Live monitor (10 seconds)
   sudo python3 tidycpu.py --pid 1234         # Monitor specific process with threads
   sudo python3 tidycpu.py --pid 1234 --threads  # Show threads in standard mode
+  sudo python3 tidycpu.py --cpu-freq         # Include CPU frequency information
         """
     )
     parser.add_argument(
@@ -719,6 +1289,23 @@ Examples:
         action="store_true",
         help="Show thread information for processes"
     )
+    parser.add_argument(
+        "--cpu-freq", "-f",
+        action="store_true",
+        help="Show CPU frequency information (min/max/current)"
+    )
+    parser.add_argument(
+        "--export-html",
+        type=str,
+        metavar="FILE",
+        help="Export report to HTML file (e.g., report.html)"
+    )
+    parser.add_argument(
+        "--export-text",
+        type=str,
+        metavar="FILE",
+        help="Export report to text file (e.g., report.txt)"
+    )
     
     args = parser.parse_args()
     
@@ -727,6 +1314,10 @@ Examples:
     # ── Privilege guard ──────────────────────
     check_root()
     print(f"  {C.GREEN}✔{C.RESET}  Running as root.\n")
+
+    # ── Get system info ──────────────────────
+    sysinfo = get_system_info(show_cpu_freq=args.cpu_freq)
+    print_system_info(sysinfo)
 
     # ── Get topology ─────────────────────────
     topology = get_cpu_topology()
@@ -738,7 +1329,8 @@ Examples:
             live_monitor(
                 duration_sec=args.duration,
                 interval_ms=500,
-                filter_pid=args.pid
+                filter_pid=args.pid,
+                show_cpu_freq=args.cpu_freq
             )
         except KeyboardInterrupt:
             print(f"\n\n  {C.YELLOW}Monitoring interrupted.{C.RESET}\n")
@@ -746,12 +1338,11 @@ Examples:
 
     # ── Standard rebalance mode ──────────────
     # ── 1. Telemetry ─────────────────────────
-    print(f"  {C.CYAN}○{C.RESET}  Sampling core usage (500 ms) …", end="", flush=True)
+    print(f"\n  {C.CYAN}○{C.RESET}  Sampling core usage (500 ms) …", end="", flush=True)
     core_stats = get_core_usage(sample_ms=500, topology=topology)
     print(f"\r  {C.GREEN}✔{C.RESET}  Core telemetry collected.          ")
 
     print_topology(topology, core_stats)
-    print_core_table(core_stats)
 
     # ── 2. Top processes + affinity ───────────
     print(f"\n  {C.CYAN}○{C.RESET}  Identifying top CPU consumers …", end="", flush=True)
@@ -759,6 +1350,21 @@ Examples:
     print(f"\r  {C.GREEN}✔{C.RESET}  Process snapshot ready.            ")
 
     print_process_table(processes, show_threads=args.threads)
+
+    # ── Export if requested ──────────────────
+    if args.export_html:
+        try:
+            filename = export_to_html(sysinfo, topology, core_stats, processes, args.export_html)
+            print(f"\n  {C.GREEN}✔{C.RESET}  HTML report exported to: {C.CYAN}{filename}{C.RESET}")
+        except Exception as e:
+            print(f"\n  {C.RED}✘{C.RESET}  HTML export failed: {e}")
+    
+    if args.export_text:
+        try:
+            filename = export_to_text(sysinfo, topology, core_stats, processes, args.export_text)
+            print(f"\n  {C.GREEN}✔{C.RESET}  Text report exported to: {C.CYAN}{filename}{C.RESET}")
+        except Exception as e:
+            print(f"\n  {C.RED}✘{C.RESET}  Text export failed: {e}")
 
     # ── 3. Conflict detection + plan ─────────
     actions = build_rebalance_plan(core_stats, processes)
