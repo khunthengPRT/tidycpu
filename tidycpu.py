@@ -94,6 +94,14 @@ class RebalanceAction:
     manual_only:   bool = False
     error_msg:     str  = ""
 
+@dataclass
+class Snapshot:
+    """Single snapshot of system state during live monitoring."""
+    timestamp:    str
+    iteration:    int
+    core_stats:   list[CoreStat]
+    processes:    list[ProcessInfo]
+
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
@@ -701,23 +709,24 @@ def clear_screen():
     """Clear terminal screen."""
     os.system('clear' if os.name != 'nt' else 'cls')
 
-def live_monitor(duration_sec: int = 5, interval_ms: int = 500, filter_pid: Optional[int] = None, show_cpu_freq: bool = False):
+def live_monitor(duration_sec: int = 5, interval_ms: int = 500, filter_pid: Optional[int] = None, show_cpu_freq: bool = False, export_html: Optional[str] = None, export_text: Optional[str] = None, sysinfo: Optional[SystemInfo] = None, topology_data: Optional[dict] = None):
     """
     Live monitoring mode - refresh stats every interval for duration seconds.
     If filter_pid is set, only show threads for that specific PID.
+    Collects snapshots for export if export options are provided.
     """
-    topology = get_cpu_topology()
+    topology = topology_data if topology_data else get_cpu_topology()
     num_cores = len(topology)
     
     iterations = int(duration_sec * 1000 / interval_ms)
+    snapshots = [] if (export_html or export_text) else None
     
     for i in range(iterations):
         clear_screen()
         print(BANNER)
         
         # Show system info on first iteration
-        if i == 0:
-            sysinfo = get_system_info(show_cpu_freq=show_cpu_freq)
+        if i == 0 and sysinfo:
             print_system_info(sysinfo)
         
         print(f"\n  {C.CYAN}Live Monitor Mode{C.RESET} — {C.DIM}Refresh: {interval_ms}ms  "
@@ -770,12 +779,38 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 500, filter_pid: Opti
             print_topology(topology, core_stats)
             print_process_table(processes, show_threads=False)
         
+        # Collect snapshot if exporting
+        if snapshots is not None:
+            snapshot = Snapshot(
+                timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                iteration=i + 1,
+                core_stats=core_stats,
+                processes=processes
+            )
+            snapshots.append(snapshot)
+        
         print(f"\n  {C.DIM}Press Ctrl+C to exit{C.RESET}")
         
         if i < iterations - 1:
             time.sleep(interval_ms / 1000)
     
     print(f"\n  {C.GREEN}Live monitoring complete.{C.RESET}\n")
+    
+    # Export snapshots if requested
+    if snapshots and sysinfo:
+        if export_html:
+            try:
+                filename = export_to_html(sysinfo, topology, core_stats, processes, export_html, snapshots=snapshots)
+                print(f"  {C.GREEN}✔{C.RESET}  HTML report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
+            except Exception as e:
+                print(f"  {C.RED}✘{C.RESET}  HTML export failed: {e}\n")
+        
+        if export_text:
+            try:
+                filename = export_to_text(sysinfo, topology, core_stats, processes, export_text, snapshots=snapshots)
+                print(f"  {C.GREEN}✔{C.RESET}  Text report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
+            except Exception as e:
+                print(f"  {C.RED}✘{C.RESET}  Text export failed: {e}\n")
 
 def print_rebalance_plan(actions: list[RebalanceAction]):
     print(f"\n{C.BOLD}{'─'*62}{C.RESET}")
@@ -833,9 +868,532 @@ def export_to_html(
     topology: dict[int, CPUTopology],
     core_stats: list[CoreStat],
     processes: list[ProcessInfo],
-    filename: str = "tidycpu_report.html"
+    filename: str = "tidycpu_report.html",
+    snapshots: Optional[list[Snapshot]] = None
 ):
-    """Export current state to HTML file with styling."""
+    """Export current state to HTML file with styling. Supports multiple snapshots from live mode."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Build HTML content
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>TidyCPU Report - {timestamp}</title>
+    <style>
+        body {{
+            font-family: 'Consolas', 'Monaco', monospace;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            line-height: 1.6;
+        }}
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+        }}
+        h1 {{
+            color: #4fc3f7;
+            border-bottom: 2px solid #4fc3f7;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            color: #81c784;
+            margin-top: 30px;
+        }}
+        h3 {{
+            color: #ffb74d;
+            margin-top: 20px;
+        }}
+        .section {{
+            background: #252526;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 5px;
+            border-left: 4px solid #4fc3f7;
+        }}
+        .snapshot {{
+            background: #2d2d30;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+            border-left: 4px solid #ffb74d;
+        }}
+        .info-grid {{
+            display: grid;
+            grid-template-columns: 200px 1fr;
+            gap: 10px;
+            margin: 10px 0;
+        }}
+        .label {{
+            color: #4fc3f7;
+            font-weight: bold;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            font-size: 14px;
+        }}
+        th {{
+            background: #2d2d30;
+            color: #4fc3f7;
+            padding: 10px;
+            text-align: left;
+            border-bottom: 2px solid #4fc3f7;
+        }}
+        td {{
+            padding: 8px 10px;
+            border-bottom: 1px solid #3e3e42;
+        }}
+        tr:hover {{
+            background: #2d2d30;
+        }}
+        .bar {{
+            background: #3e3e42;
+            height: 20px;
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }}
+        .bar-fill {{
+            height: 100%;
+            transition: width 0.3s;
+        }}
+        .bar-fill.hot {{ background: #f44336; }}
+        .bar-fill.warm {{ background: #ff9800; }}
+        .bar-fill.cold {{ background: #4caf50; }}
+        .status {{
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-weight: bold;
+            font-size: 12px;
+        }}
+        .status.hot {{ background: #f44336; color: white; }}
+        .status.warm {{ background: #ff9800; color: white; }}
+        .status.cold {{ background: #4caf50; color: white; }}
+        .summary {{
+            display: flex;
+            gap: 20px;
+            margin: 15px 0;
+            flex-wrap: wrap;
+        }}
+        .summary-item {{
+            background: #2d2d30;
+            padding: 10px 15px;
+            border-radius: 5px;
+        }}
+        .dot {{
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }}
+        .dot.hot {{ background: #f44336; }}
+        .dot.warm {{ background: #ff9800; }}
+        .dot.cold {{ background: #4caf50; }}
+        .timestamp {{
+            color: #858585;
+            font-size: 12px;
+        }}
+        .two-column {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }}
+        .iteration-badge {{
+            display: inline-block;
+            background: #ffb74d;
+            color: #1e1e1e;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-weight: bold;
+            margin-left: 10px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TidyCPU — CPU Affinity Optimization Report</h1>
+        <p class="timestamp">Generated: {timestamp}</p>
+"""
+    
+    # System Information
+    html += """
+        <div class="section">
+            <h2>System Information</h2>
+            <div class="info-grid">
+                <div class="label">CPU Model:</div>
+                <div>{}</div>
+                <div class="label">Total Memory:</div>
+                <div>{}</div>
+                <div class="label">Available Memory:</div>
+                <div>{}</div>
+""".format(sysinfo.cpu_model, sysinfo.total_memory, sysinfo.available_memory)
+    
+    if sysinfo.cpu_freq_cur:
+        html += f"""
+                <div class="label">CPU Frequency:</div>
+                <div>{sysinfo.cpu_freq_min:.0f} MHz - {sysinfo.cpu_freq_max:.0f} MHz (Current: {sysinfo.cpu_freq_cur:.0f} MHz)</div>
+"""
+    
+    html += f"""
+                <div class="label">Kernel Cmdline:</div>
+                <div style="word-break: break-all;">{sysinfo.kernel_cmdline}</div>
+            </div>
+        </div>
+"""
+    
+    # Helper function to render CPU topology section
+    def render_topology_section(core_stats_data, title_suffix=""):
+        stats_map = {cs.core_id: cs for cs in core_stats_data}
+        total_cores = len(stats_map)
+        left_count = (total_cores + 1) // 2
+        
+        hot_count = sum(1 for c in core_stats_data if c.label == "HOT")
+        warm_count = sum(1 for c in core_stats_data if c.label == "WARM")
+        cold_count = sum(1 for c in core_stats_data if c.label == "COLD")
+        
+        by_physical = {}
+        for logical_id, topo in topology.items():
+            if topo.physical_id not in by_physical:
+                by_physical[topo.physical_id] = []
+            by_physical[topo.physical_id].append(topo)
+        
+        total_physical = len(by_physical)
+        total_physical_cores = sum(len(set(t.core_id for t in cores)) for cores in by_physical.values())
+        ht_enabled = total_cores > total_physical_cores
+        
+        section_html = f"""
+            <h3>CPU Topology{title_suffix}</h3>
+            <div class="summary">
+                <div class="summary-item"><span class="dot hot"></span>{hot_count} Hot Cores</div>
+                <div class="summary-item"><span class="dot warm"></span>{warm_count} Warm Cores</div>
+                <div class="summary-item"><span class="dot cold"></span>{cold_count} Cold Cores</div>
+                <div class="summary-item">{total_physical} Physical CPU(s)</div>
+                <div class="summary-item">{total_physical_cores} Physical Cores</div>
+                <div class="summary-item">{total_cores} Logical Cores</div>
+                <div class="summary-item">Hyperthreading: {'Enabled' if ht_enabled else 'Disabled'}</div>
+            </div>
+            <div class="two-column">
+"""
+        
+        # Left column
+        section_html += """
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Core</th>
+                            <th>Usage</th>
+                            <th>Bar</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+        
+        for i in range(left_count):
+            if i in stats_map:
+                cs = stats_map[i]
+                label_class = cs.label.lower()
+                section_html += f"""
+                        <tr>
+                            <td>CPU{cs.core_id}</td>
+                            <td>{cs.usage:.1f}%</td>
+                            <td>
+                                <div class="bar">
+                                    <div class="bar-fill {label_class}" style="width: {cs.usage}%"></div>
+                                </div>
+                            </td>
+                            <td><span class="status {label_class}">{cs.label}</span></td>
+                        </tr>
+"""
+        
+        section_html += """
+                    </tbody>
+                </table>
+"""
+        
+        # Right column
+        section_html += """
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Core</th>
+                            <th>Usage</th>
+                            <th>Bar</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+        
+        for i in range(left_count):
+            right_id = i + left_count
+            if right_id < total_cores and right_id in stats_map:
+                cs = stats_map[right_id]
+                label_class = cs.label.lower()
+                section_html += f"""
+                        <tr>
+                            <td>CPU{cs.core_id}</td>
+                            <td>{cs.usage:.1f}%</td>
+                            <td>
+                                <div class="bar">
+                                    <div class="bar-fill {label_class}" style="width: {cs.usage}%"></div>
+                                </div>
+                            </td>
+                            <td><span class="status {label_class}">{cs.label}</span></td>
+                        </tr>
+"""
+        
+        section_html += """
+                    </tbody>
+                </table>
+            </div>
+"""
+        return section_html
+    
+    # If we have snapshots (live mode), render each one
+    if snapshots:
+        html += f"""
+        <div class="section">
+            <h2>Live Monitoring Results <span class="iteration-badge">{len(snapshots)} Snapshots</span></h2>
+"""
+        for snap in snapshots:
+            html += f"""
+            <div class="snapshot">
+                <h3>Iteration {snap.iteration} <span class="timestamp">@ {snap.timestamp}</span></h3>
+                {render_topology_section(snap.core_stats, f" - Iteration {snap.iteration}")}
+"""
+            
+            if snap.processes:
+                html += """
+                <h3>Top CPU Consumers</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>PID</th>
+                            <th>Process</th>
+                            <th>CPU %</th>
+                            <th>Affinity Mask</th>
+                            <th>Cores</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+                for p in snap.processes:
+                    cores_str = ",".join(map(str, p.current_cores)) if p.current_cores else "all"
+                    html += f"""
+                        <tr>
+                            <td>{p.pid}</td>
+                            <td>{p.name}</td>
+                            <td>{p.cpu_percent:.1f}%</td>
+                            <td>{p.affinity_mask}</td>
+                            <td>{cores_str}</td>
+                        </tr>
+"""
+                html += """
+                    </tbody>
+                </table>
+"""
+            
+            html += """
+            </div>
+"""
+        html += """
+        </div>
+"""
+    else:
+        # Single snapshot mode
+        html += f"""
+        <div class="section">
+            {render_topology_section(core_stats)}
+        </div>
+"""
+        
+        # Top Processes
+        if processes:
+            html += """
+        <div class="section">
+            <h2>Top CPU Consumers</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>PID</th>
+                        <th>Process</th>
+                        <th>CPU %</th>
+                        <th>Affinity Mask</th>
+                        <th>Cores</th>
+                    </tr>
+                </thead>
+                <tbody>
+"""
+            for p in processes:
+                cores_str = ",".join(map(str, p.current_cores)) if p.current_cores else "all"
+                html += f"""
+                    <tr>
+                        <td>{p.pid}</td>
+                        <td>{p.name}</td>
+                        <td>{p.cpu_percent:.1f}%</td>
+                        <td>{p.affinity_mask}</td>
+                        <td>{cores_str}</td>
+                    </tr>
+"""
+            
+            html += """
+                </tbody>
+            </table>
+        </div>
+"""
+    
+    html += """
+    </div>
+</body>
+</html>
+"""
+    
+    with open(filename, 'w') as f:
+        f.write(html)
+    
+    return filename
+
+def export_to_text(
+    sysinfo: SystemInfo,
+    topology: dict[int, CPUTopology],
+    core_stats: list[CoreStat],
+    processes: list[ProcessInfo],
+    filename: str = "tidycpu_report.txt",
+    snapshots: Optional[list[Snapshot]] = None
+):
+    """Export current state to text file. Supports multiple snapshots from live mode."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    output = []
+    output.append("=" * 78)
+    output.append("TidyCPU — CPU Affinity Optimization Report")
+    output.append(f"Generated: {timestamp}")
+    output.append("=" * 78)
+    output.append("")
+    
+    # System Information
+    output.append("SYSTEM INFORMATION")
+    output.append("-" * 78)
+    output.append(f"CPU Model:       {sysinfo.cpu_model}")
+    output.append(f"Total Memory:    {sysinfo.total_memory}")
+    output.append(f"Available Memory: {sysinfo.available_memory}")
+    
+    if sysinfo.cpu_freq_cur:
+        output.append(f"CPU Frequency:   {sysinfo.cpu_freq_min:.0f} MHz - {sysinfo.cpu_freq_max:.0f} MHz")
+        output.append(f"                 (Current: {sysinfo.cpu_freq_cur:.0f} MHz)")
+    
+    output.append(f"Kernel Cmdline:  {sysinfo.kernel_cmdline}")
+    output.append("")
+    
+    # Helper function to render topology
+    def render_topology(core_stats_data, title_suffix=""):
+        stats_map = {cs.core_id: cs for cs in core_stats_data}
+        total_cores = len(stats_map)
+        left_count = (total_cores + 1) // 2
+        
+        hot_count = sum(1 for c in core_stats_data if c.label == "HOT")
+        warm_count = sum(1 for c in core_stats_data if c.label == "WARM")
+        cold_count = sum(1 for c in core_stats_data if c.label == "COLD")
+        
+        by_physical = {}
+        for logical_id, topo in topology.items():
+            if topo.physical_id not in by_physical:
+                by_physical[topo.physical_id] = []
+            by_physical[topo.physical_id].append(topo)
+        
+        total_physical = len(by_physical)
+        total_physical_cores = sum(len(set(t.core_id for t in cores)) for cores in by_physical.values())
+        ht_enabled = total_cores > total_physical_cores
+        
+        lines = []
+        lines.append(f"CPU TOPOLOGY{title_suffix}")
+        lines.append("-" * 78)
+        lines.append(f"  Core    Usage  Bar                     Status  "
+                     f"Core    Usage  Bar                     Status")
+        lines.append(f"  ────    ─────  ──────────────────────  ──────  "
+                     f"────    ─────  ──────────────────────  ──────")
+        
+        for i in range(left_count):
+            left_id = i
+            right_id = i + left_count
+            
+            if left_id in stats_map:
+                cs_left = stats_map[left_id]
+                bar_left = '█' * int(cs_left.usage / 100 * 22) + '░' * (22 - int(cs_left.usage / 100 * 22))
+                left_line = f"  CPU{cs_left.core_id:<3} {cs_left.usage:>5.1f}%  {bar_left}  {cs_left.label:<6}"
+            else:
+                left_line = " " * 44
+            
+            if right_id < total_cores and right_id in stats_map:
+                cs_right = stats_map[right_id]
+                bar_right = '█' * int(cs_right.usage / 100 * 22) + '░' * (22 - int(cs_right.usage / 100 * 22))
+                right_line = f"  CPU{cs_right.core_id:<3} {cs_right.usage:>5.1f}%  {bar_right}  {cs_right.label:<6}"
+            else:
+                right_line = ""
+            
+            lines.append(left_line + right_line)
+        
+        lines.append("")
+        lines.append(f"Summary: ● {hot_count} Hot  ● {warm_count} Warm  ● {cold_count} Cold  |  "
+                     f"{total_physical} physical CPU(s), {total_physical_cores} physical core(s), "
+                     f"{total_cores} logical core(s)")
+        lines.append(f"Hyperthreading: {'Enabled' if ht_enabled else 'Disabled'}")
+        
+        return lines
+    
+    # If we have snapshots (live mode), render each one
+    if snapshots:
+        output.append(f"LIVE MONITORING RESULTS ({len(snapshots)} snapshots)")
+        output.append("=" * 78)
+        output.append("")
+        
+        for snap in snapshots:
+            output.append(f"[Iteration {snap.iteration}] @ {snap.timestamp}")
+            output.append("-" * 78)
+            output.extend(render_topology(snap.core_stats, f" - Iteration {snap.iteration}"))
+            
+            if snap.processes:
+                output.append("")
+                output.append("TOP CPU CONSUMERS")
+                output.append("-" * 78)
+                output.append(f"  {'PID':>7}  {'Process':<24}  {'CPU%':>6}  {'Affinity Mask':>14}  Cores")
+                output.append(f"  {'───────':>7}  {'────────────────────────':<24}  {'─────':>6}  {'──────────────':>14}  ─────")
+                
+                for p in snap.processes:
+                    cores_str = ",".join(map(str, p.current_cores)) if p.current_cores else "all"
+                    output.append(f"  {p.pid:>7}  {p.name:<24}  {p.cpu_percent:>5.1f}%  {p.affinity_mask:>14}  {cores_str}")
+            
+            output.append("")
+            output.append("=" * 78)
+            output.append("")
+    else:
+        # Single snapshot mode
+        output.extend(render_topology(core_stats))
+        output.append("")
+        
+        if processes:
+            output.append("TOP CPU CONSUMERS")
+            output.append("-" * 78)
+            output.append(f"  {'PID':>7}  {'Process':<24}  {'CPU%':>6}  {'Affinity Mask':>14}  Cores")
+            output.append(f"  {'───────':>7}  {'────────────────────────':<24}  {'─────':>6}  {'──────────────':>14}  ─────")
+            
+            for p in processes:
+                cores_str = ",".join(map(str, p.current_cores)) if p.current_cores else "all"
+                output.append(f"  {p.pid:>7}  {p.name:<24}  {p.cpu_percent:>5.1f}%  {p.affinity_mask:>14}  {cores_str}")
+            
+            output.append("")
+    
+    output.append("=" * 78)
+    
+    with open(filename, 'w') as f:
+        f.write('\n'.join(output))
+    
+    return filename
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # Build HTML content
@@ -1145,114 +1703,6 @@ def export_to_html(
     
     return filename
 
-def export_to_text(
-    sysinfo: SystemInfo,
-    topology: dict[int, CPUTopology],
-    core_stats: list[CoreStat],
-    processes: list[ProcessInfo],
-    filename: str = "tidycpu_report.txt"
-):
-    """Export current state to text file with ANSI color codes preserved."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    output = []
-    output.append("=" * 78)
-    output.append("TidyCPU — CPU Affinity Optimization Report")
-    output.append(f"Generated: {timestamp}")
-    output.append("=" * 78)
-    output.append("")
-    
-    # System Information
-    output.append("SYSTEM INFORMATION")
-    output.append("-" * 78)
-    output.append(f"CPU Model:       {sysinfo.cpu_model}")
-    output.append(f"Total Memory:    {sysinfo.total_memory}")
-    output.append(f"Available Memory: {sysinfo.available_memory}")
-    
-    if sysinfo.cpu_freq_cur:
-        output.append(f"CPU Frequency:   {sysinfo.cpu_freq_min:.0f} MHz - {sysinfo.cpu_freq_max:.0f} MHz")
-        output.append(f"                 (Current: {sysinfo.cpu_freq_cur:.0f} MHz)")
-    
-    output.append(f"Kernel Cmdline:  {sysinfo.kernel_cmdline}")
-    output.append("")
-    
-    # CPU Topology
-    stats_map = {cs.core_id: cs for cs in core_stats}
-    total_cores = len(topology)
-    left_count = (total_cores + 1) // 2
-    
-    hot_count = sum(1 for c in core_stats if c.label == "HOT")
-    warm_count = sum(1 for c in core_stats if c.label == "WARM")
-    cold_count = sum(1 for c in core_stats if c.label == "COLD")
-    
-    by_physical = {}
-    for logical_id, topo in topology.items():
-        if topo.physical_id not in by_physical:
-            by_physical[topo.physical_id] = []
-        by_physical[topo.physical_id].append(topo)
-    
-    total_physical = len(by_physical)
-    total_physical_cores = sum(len(set(t.core_id for t in cores)) for cores in by_physical.values())
-    ht_enabled = total_cores > total_physical_cores
-    
-    output.append("CPU TOPOLOGY")
-    output.append("-" * 78)
-    output.append(f"  Core    Usage  Bar                     Status  "
-                  f"Core    Usage  Bar                     Status")
-    output.append(f"  ────    ─────  ──────────────────────  ──────  "
-                  f"────    ─────  ──────────────────────  ──────")
-    
-    for i in range(left_count):
-        left_id = i
-        right_id = i + left_count
-        
-        # Left column
-        if left_id in stats_map:
-            cs_left = stats_map[left_id]
-            bar_left = '█' * int(cs_left.usage / 100 * 22) + '░' * (22 - int(cs_left.usage / 100 * 22))
-            left_line = f"  CPU{cs_left.core_id:<3} {cs_left.usage:>5.1f}%  {bar_left}  {cs_left.label:<6}"
-        else:
-            left_line = " " * 44
-        
-        # Right column
-        if right_id < total_cores and right_id in stats_map:
-            cs_right = stats_map[right_id]
-            bar_right = '█' * int(cs_right.usage / 100 * 22) + '░' * (22 - int(cs_right.usage / 100 * 22))
-            right_line = f"  CPU{cs_right.core_id:<3} {cs_right.usage:>5.1f}%  {bar_right}  {cs_right.label:<6}"
-        else:
-            right_line = ""
-        
-        output.append(left_line + right_line)
-    
-    output.append("")
-    output.append(f"Summary: ● {hot_count} Hot  ● {warm_count} Warm  ● {cold_count} Cold  |  "
-                  f"{total_physical} physical CPU(s), {total_physical_cores} physical core(s), "
-                  f"{total_cores} logical core(s)")
-    output.append(f"Hyperthreading: {'Enabled' if ht_enabled else 'Disabled'}")
-    output.append("")
-    
-    # Top Processes
-    if processes:
-        output.append("TOP CPU CONSUMERS")
-        output.append("-" * 78)
-        output.append(f"  {'PID':>7}  {'Process':<24}  {'CPU%':>6}  {'Affinity Mask':>14}  Cores")
-        output.append(f"  {'───────':>7}  {'────────────────────────':<24}  {'─────':>6}  {'──────────────':>14}  ─────")
-        
-        for p in processes:
-            cores_str = ",".join(map(str, p.current_cores)) if p.current_cores else "all"
-            output.append(f"  {p.pid:>7}  {p.name:<24}  {p.cpu_percent:>5.1f}%  {p.affinity_mask:>14}  {cores_str}")
-        
-        output.append("")
-    
-    output.append("=" * 78)
-    
-    with open(filename, 'w') as f:
-        f.write('\n'.join(output))
-    
-    return filename
-
-# ─────────────────────────────────────────────
-# Main
 # ─────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
@@ -1330,7 +1780,11 @@ Examples:
                 duration_sec=args.duration,
                 interval_ms=500,
                 filter_pid=args.pid,
-                show_cpu_freq=args.cpu_freq
+                show_cpu_freq=args.cpu_freq,
+                export_html=args.export_html,
+                export_text=args.export_text,
+                sysinfo=sysinfo,
+                topology_data=topology
             )
         except KeyboardInterrupt:
             print(f"\n\n  {C.YELLOW}Monitoring interrupted.{C.RESET}\n")
