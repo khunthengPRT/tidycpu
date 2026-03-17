@@ -1710,12 +1710,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sudo python3 tidycpu.py                    # Standard rebalance mode
+  sudo python3 tidycpu.py                    # View CPU topology only
+  sudo python3 tidycpu.py --threads          # Show processes and rebalancing
+  sudo python3 tidycpu.py --check-pid 1234   # Check specific process affinity
   sudo python3 tidycpu.py --live             # Live monitor (5 seconds)
   sudo python3 tidycpu.py --live --duration 10  # Live monitor (10 seconds)
   sudo python3 tidycpu.py --pid 1234         # Monitor specific process with threads
-  sudo python3 tidycpu.py --pid 1234 --threads  # Show threads in standard mode
   sudo python3 tidycpu.py --cpu-freq         # Include CPU frequency information
+  sudo python3 tidycpu.py --export-html report.html  # Export to HTML
         """
     )
     parser.add_argument(
@@ -1743,6 +1745,12 @@ Examples:
         "--cpu-freq", "-f",
         action="store_true",
         help="Show CPU frequency information (min/max/current)"
+    )
+    parser.add_argument(
+        "--check-pid",
+        type=int,
+        metavar="PID",
+        help="Check affinity and CPU usage for a specific process ID"
     )
     parser.add_argument(
         "--export-html",
@@ -1773,6 +1781,90 @@ Examples:
     topology = get_cpu_topology()
     num_cores = len(topology)
 
+    # ── Check specific PID mode ──────────────
+    if args.check_pid:
+        print(f"\n  {C.CYAN}Checking PID {args.check_pid}{C.RESET}\n")
+        
+        # Get process info
+        rc, out, _ = run(["ps", "-p", str(args.check_pid), "-o", "pid,pcpu,comm", "--no-headers"])
+        if rc != 0:
+            print(f"  {C.RED}✘ PID {args.check_pid} not found{C.RESET}\n")
+            sys.exit(1)
+        
+        parts = out.strip().split(None, 2)
+        if len(parts) < 3:
+            print(f"  {C.RED}✘ Unable to read process info{C.RESET}\n")
+            sys.exit(1)
+        
+        try:
+            pid = int(parts[0])
+            cpu_percent = float(parts[1])
+            name = parts[2].strip()
+        except ValueError:
+            print(f"  {C.RED}✘ Invalid process data{C.RESET}\n")
+            sys.exit(1)
+        
+        # Get affinity
+        rc2, out2, _ = run(["taskset", "-p", str(pid)])
+        if rc2 != 0:
+            print(f"  {C.RED}✘ Unable to read affinity{C.RESET}\n")
+            sys.exit(1)
+        
+        m = re.search(r"current affinity mask:\s*([0-9a-fA-F,]+)", out2)
+        if not m:
+            print(f"  {C.RED}✘ Unable to parse affinity mask{C.RESET}\n")
+            sys.exit(1)
+        
+        affinity_mask = m.group(1)
+        current_cores = mask_to_cores(affinity_mask, num_cores)
+        
+        # Get current core stats
+        core_stats = get_core_usage(sample_ms=500, topology=topology)
+        stats_map = {cs.core_id: cs for cs in core_stats}
+        
+        # Print process info
+        print(f"{C.BOLD}{'─'*78}{C.RESET}")
+        print(f"{C.BOLD}  PROCESS DETAILS{C.RESET}")
+        print(f"{C.BOLD}{'─'*78}{C.RESET}")
+        print(f"  {C.CYAN}PID:{C.RESET}            {pid}")
+        print(f"  {C.CYAN}Process:{C.RESET}        {name}")
+        print(f"  {C.CYAN}CPU Usage:{C.RESET}      {C.YELLOW}{cpu_percent:.1f}%{C.RESET}")
+        print(f"  {C.CYAN}Affinity Mask:{C.RESET}  {affinity_mask}")
+        
+        cores_str = ",".join(map(str, current_cores)) if current_cores else "all"
+        print(f"  {C.CYAN}Pinned Cores:{C.RESET}   {cores_str}")
+        
+        # Show status of each core this process is on
+        print(f"\n{C.BOLD}  CORE STATUS{C.RESET}")
+        print(f"{C.BOLD}{'─'*78}{C.RESET}")
+        
+        if current_cores:
+            for core_id in current_cores:
+                if core_id in stats_map:
+                    cs = stats_map[core_id]
+                    bar = usage_bar(cs.usage, width=20)
+                    print(f"  CPU{core_id:>2}  {cs.usage:>5.1f}%  {bar}  {label_color(cs.label)}")
+        else:
+            print(f"  {C.DIM}Process can run on any core (no affinity set){C.RESET}")
+        
+        # Get threads if available
+        threads = get_threads_for_pid(pid, num_cores)
+        if threads:
+            print(f"\n{C.BOLD}  THREADS ({len(threads)}){C.RESET}")
+            print(f"{C.BOLD}{'─'*78}{C.RESET}")
+            print(f"  {'TID':>7}  {'Name':<24}  {'CPU%':>6}  Cores")
+            print(f"  {'───':>7}  {'────────────────────────':<24}  {'─────':>6}  ─────")
+            
+            for t in threads[:15]:  # Show max 15 threads
+                t_cores_str = ",".join(map(str, t.current_cores)) if t.current_cores else "all"
+                print(f"  {t.tid:>7}  {t.name:<24}  {C.YELLOW}{t.cpu_percent:>5.1f}%{C.RESET}  {t_cores_str}")
+            
+            if len(threads) > 15:
+                print(f"  {C.DIM}... {len(threads) - 15} more threads{C.RESET}")
+        
+        print()
+        sys.exit(0)
+
     # ── Live monitor mode ────────────────────
     if args.live or args.pid:
         try:
@@ -1799,15 +1891,22 @@ Examples:
     print_topology(topology, core_stats)
 
     # ── 2. Top processes + affinity ───────────
-    print(f"\n  {C.CYAN}○{C.RESET}  Identifying top CPU consumers …", end="", flush=True)
-    processes = get_top_processes(n=5, num_cores=num_cores, with_threads=args.threads)
-    print(f"\r  {C.GREEN}✔{C.RESET}  Process snapshot ready.            ")
-
-    print_process_table(processes, show_threads=args.threads)
+    # Only fetch processes if threads are requested or if we'll be doing rebalancing
+    if args.threads:
+        print(f"\n  {C.CYAN}○{C.RESET}  Identifying top CPU consumers …", end="", flush=True)
+        processes = get_top_processes(n=5, num_cores=num_cores, with_threads=True)
+        print(f"\r  {C.GREEN}✔{C.RESET}  Process snapshot ready.            ")
+        print_process_table(processes, show_threads=True)
+    else:
+        # Skip process collection for standard mode
+        processes = []
 
     # ── Export if requested ──────────────────
     if args.export_html:
         try:
+            # For export, get processes if we don't have them yet
+            if not processes:
+                processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
             filename = export_to_html(sysinfo, topology, core_stats, processes, args.export_html)
             print(f"\n  {C.GREEN}✔{C.RESET}  HTML report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
@@ -1815,40 +1914,49 @@ Examples:
     
     if args.export_text:
         try:
+            # For export, get processes if we don't have them yet
+            if not processes:
+                processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
             filename = export_to_text(sysinfo, topology, core_stats, processes, args.export_text)
             print(f"\n  {C.GREEN}✔{C.RESET}  Text report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
             print(f"\n  {C.RED}✘{C.RESET}  Text export failed: {e}")
 
     # ── 3. Conflict detection + plan ─────────
-    actions = build_rebalance_plan(core_stats, processes)
-    print_rebalance_plan(actions)
+    # Only do rebalancing if user wants to proceed (not just viewing)
+    if args.threads:
+        # If user explicitly requested threads, show rebalancing
+        actions = build_rebalance_plan(core_stats, processes)
+        print_rebalance_plan(actions)
 
-    if not actions:
-        print(f"\n{C.DIM}  Nothing to do. Exiting.{C.RESET}\n")
-        sys.exit(0)
+        if not actions:
+            print(f"\n{C.DIM}  Nothing to do. Exiting.{C.RESET}\n")
+            sys.exit(0)
 
-    # ── 4. Prompt + execute ──────────────────
-    print(f"\n{C.BOLD}  Apply these changes? (y/n): {C.RESET}", end="", flush=True)
-    try:
-        answer = input().strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print(f"\n{C.YELLOW}  Aborted.{C.RESET}\n")
-        sys.exit(0)
+        # ── 4. Prompt + execute ──────────────────
+        print(f"\n{C.BOLD}  Apply these changes? (y/n): {C.RESET}", end="", flush=True)
+        try:
+            answer = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{C.YELLOW}  Aborted.{C.RESET}\n")
+            sys.exit(0)
 
-    if answer != "y":
-        print(f"  {C.YELLOW}⚡  No changes applied. Plan saved for manual review.{C.RESET}\n")
-        # Print manual commands anyway
-        for a in actions:
-            to_s = cores_to_cpulist(a.to_cores)
-            print(f"     {C.DIM}sudo taskset -pc {to_s} {a.pid}{C.RESET}")
-        print()
-        sys.exit(0)
+        if answer != "y":
+            print(f"  {C.YELLOW}⚡  No changes applied. Plan saved for manual review.{C.RESET}\n")
+            # Print manual commands anyway
+            for a in actions:
+                to_s = cores_to_cpulist(a.to_cores)
+                print(f"     {C.DIM}sudo taskset -pc {to_s} {a.pid}{C.RESET}")
+            print()
+            sys.exit(0)
 
-    print(f"\n  {C.CYAN}○{C.RESET}  Applying affinity changes …\n")
-    results = [apply_action(a) for a in actions]
-    print_results(results)
-    print(f"\n{C.GREEN}{C.BOLD}  TidyCPU complete.{C.RESET}\n")
+        print(f"\n  {C.CYAN}○{C.RESET}  Applying affinity changes …\n")
+        results = [apply_action(a) for a in actions]
+        print_results(results)
+        print(f"\n{C.GREEN}{C.BOLD}  TidyCPU complete.{C.RESET}\n")
+    else:
+        # Standard view mode - just exit after showing topology
+        print(f"\n{C.DIM}  Use --threads to see processes and rebalancing options.{C.RESET}\n")
 
 if __name__ == "__main__":
     main()
