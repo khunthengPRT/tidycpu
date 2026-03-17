@@ -217,6 +217,15 @@ Features:
 - 📧 Perfect for email reports or documentation
 - 🔤 Unicode bars (█░) for visual usage display
 
+**Live Monitoring with Export** — Capture all iterations:
+```bash
+# Monitor for 5 seconds (10 snapshots at 500ms intervals) and export all
+sudo python3 tidycpu.py --live --duration 5 \
+    --export-html live_analysis.html
+
+# Result: HTML contains all 10 snapshots showing CPU usage evolution
+```
+
 Both formats include:
 - Complete system information
 - Full CPU topology breakdown
