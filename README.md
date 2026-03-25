@@ -16,6 +16,16 @@ cd tidycpu
 
 # Optional: install taskset if missing
 apt install util-linux
+
+# Install as a system command (run once)
+sudo cp tidycpu.py /usr/local/bin/tidycpu
+sudo chmod +x /usr/local/bin/tidycpu
+```
+
+After installation you can invoke it directly without `python3`:
+
+```bash
+sudo tidycpu --live
 ```
 
 ---
@@ -23,7 +33,7 @@ apt install util-linux
 ## Usage
 
 ```
-sudo python3 tidycpu.py [OPTIONS]
+sudo tidycpu [OPTIONS]
 ```
 
 ### Options
@@ -45,41 +55,41 @@ sudo python3 tidycpu.py [OPTIONS]
 
 ```bash
 # View CPU topology snapshot (default mode)
-sudo python3 tidycpu.py
+sudo tidycpu
 
 # Live monitor — 5 iterations, 3 s each
-sudo python3 tidycpu.py --live
+sudo tidycpu --live
 
 # Live monitor — 10 iterations
-sudo python3 tidycpu.py --live --duration 10
+sudo tidycpu --live --duration 10
 
 # Monitor a single process by PID
-sudo python3 tidycpu.py --pid 1234
+sudo tidycpu --pid 1234
 
 # Monitor a single process by name
-sudo python3 tidycpu.py --pid nginx
+sudo tidycpu --pid nginx
 
 # Monitor multiple processes (pipe-separated names or PIDs)
-sudo python3 tidycpu.py --pid "nginx|php-fpm"
-sudo python3 tidycpu.py --pid "nginx|php-fpm|1234"
+sudo tidycpu --pid "nginx|php-fpm"
+sudo tidycpu --pid "nginx|php-fpm|1234"
 
 # Show top CPU consumers and propose rebalancing
-sudo python3 tidycpu.py --threads
+sudo tidycpu --threads
 
 # Inspect a specific PID (affinity, core status, threads)
-sudo python3 tidycpu.py --check-pid 1234
+sudo tidycpu --check-pid 1234
 
 # Include CPU frequency info
-sudo python3 tidycpu.py --cpu-freq
+sudo tidycpu --cpu-freq
 
 # Export a live-monitor run to HTML (tabbed per iteration)
-sudo python3 tidycpu.py --live --duration 5 --export-html /tmp/report.html
+sudo tidycpu --live --duration 5 --export-html /tmp/report.html
 
 # Export to plain text
-sudo python3 tidycpu.py --live --duration 5 --export-text /tmp/report.txt
+sudo tidycpu --live --duration 5 --export-text /tmp/report.txt
 
 # Combine: monitor nginx + php-fpm live, export to HTML
-sudo python3 tidycpu.py --pid "nginx|php-fpm" --duration 10 --export-html /tmp/report.html
+sudo tidycpu --pid "nginx|php-fpm" --duration 10 --export-html /tmp/report.html
 ```
 
 ---
