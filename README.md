@@ -48,6 +48,7 @@ sudo tidycpu [OPTIONS]
 | `--check-pid PID` | | Inspect a specific PID: affinity, cores, threads |
 | `--export-html FILE` | | Export report to an HTML file |
 | `--export-text FILE` | | Export report to a plain-text file |
+| `--version` | `-v` | Show version and exit |
 
 ---
 
@@ -90,6 +91,10 @@ sudo tidycpu --live --duration 5 --export-text /tmp/report.txt
 
 # Combine: monitor nginx + php-fpm live, export to HTML
 sudo tidycpu --pid "nginx|php-fpm" --duration 10 --export-html /tmp/report.html
+
+# Show version
+tidycpu --version
+tidycpu -v
 ```
 
 ---

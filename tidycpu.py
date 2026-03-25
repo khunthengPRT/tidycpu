@@ -18,6 +18,8 @@ from typing import Optional
 from collections import defaultdict
 from datetime import datetime
 
+VERSION = "1.0"
+
 # ─────────────────────────────────────────────
 # ANSI Color Palette
 # ─────────────────────────────────────────────
@@ -1271,17 +1273,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sudo python3 tidycpu.py                          # View CPU topology only
-  sudo python3 tidycpu.py --threads                # Show processes and rebalancing
-  sudo python3 tidycpu.py --check-pid 1234         # Check specific process affinity
-  sudo python3 tidycpu.py --live                   # Live monitor (5 seconds)
-  sudo python3 tidycpu.py --live --duration 10     # Live monitor (10 seconds)
-  sudo python3 tidycpu.py --pid 1234               # Monitor single PID
-  sudo python3 tidycpu.py --pid nginx              # Monitor process by name
-  sudo python3 tidycpu.py --pid "nginx|php-fpm"    # Monitor multiple processes
-  sudo python3 tidycpu.py --pid "1234|nginx|5678"  # Mix of PIDs and names
-  sudo python3 tidycpu.py --cpu-freq               # Include CPU frequency info
-  sudo python3 tidycpu.py --export-html report.html  # Export to HTML
+  sudo tidycpu                                  # View CPU topology only
+  sudo tidycpu --threads                        # Show processes and rebalancing
+  sudo tidycpu --check-pid 1234                 # Check specific process affinity
+  sudo tidycpu --live                           # Live monitor (5 seconds)
+  sudo tidycpu --live --duration 10             # Live monitor (10 seconds)
+  sudo tidycpu --pid 1234                       # Monitor single PID
+  sudo tidycpu --pid nginx                      # Monitor process by name
+  sudo tidycpu --pid "nginx|php-fpm"            # Monitor multiple processes
+  sudo tidycpu --pid "1234|nginx|5678"          # Mix of PIDs and names
+  sudo tidycpu --cpu-freq                       # Include CPU frequency info
+  sudo tidycpu --export-html report.html        # Export to HTML
+  sudo tidycpu --version                        # Show version
         """
     )
     parser.add_argument("--live", "-l", action="store_true",
@@ -1300,7 +1303,9 @@ Examples:
         help="Export report to HTML file (e.g., report.html)")
     parser.add_argument("--export-text", type=str, metavar="FILE",
         help="Export report to text file (e.g., report.txt)")
-    
+    parser.add_argument("--version", "-v", action="version",
+        version=f"tidycpu {VERSION}")
+
     args = parser.parse_args()
     
     print(BANNER)
