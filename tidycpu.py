@@ -696,78 +696,93 @@ def print_system_info(sysinfo: SystemInfo):
         print(f"    {C.DIM}{cmdline}{C.RESET}")
 
 def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat]):
-    """Print CPU topology in compact two-column layout."""
+    """Print CPU topology — two-column for HT servers, single-column otherwise."""
     print(f"\n{C.BOLD}{'─'*78}{C.RESET}")
     print(f"{C.BOLD}  CPU TOPOLOGY{C.RESET}")
     print(f"{C.BOLD}{'─'*78}{C.RESET}")
-    
+
     stats_map = {cs.core_id: cs for cs in core_stats}
     total_cores = len(topology)
-    
-    left_count = (total_cores + 1) // 2
-    
-    print(f"\n  {'Core':<6} {'Usage':>6}  {'Bar':<22}  {'Status':<6}  {'Process':<16}  "
-          f"{'Core':<6} {'Usage':>6}  {'Bar':<22}  {'Status':<6}  {'Process':<16}")
-    print(f"  {'────':<6} {'─────':>6}  {'──────────────────────':<22}  {'──────':<6}  {'────────────────':<16}  "
-          f"{'────':<6} {'─────':>6}  {'──────────────────────':<22}  {'──────':<6}  {'────────────────':<16}")
-    
-    for i in range(left_count):
-        left_id = i
-        right_id = i + left_count
-        
-        if left_id in stats_map:
-            cs_left = stats_map[left_id]
-            core_name_left = f"CPU{cs_left.core_id}"
-            proc_left = (cs_left.top_proc[:15] if cs_left.top_proc else C.DIM + '—' + C.RESET)
-            left_line = (
-                f"  {C.DIM}{core_name_left:<6}{C.RESET} "
-                f"{cs_left.usage:>5.1f}%  "
-                f"{usage_bar(cs_left.usage, width=22)}  "
-                f"{label_color(cs_left.label):<6}  "
-                f"{C.MAGENTA}{proc_left:<16}{C.RESET}"
-            )
-        else:
-            left_line = " " * 68
-        
-        if right_id < total_cores and right_id in stats_map:
-            cs_right = stats_map[right_id]
-            core_name_right = f"CPU{cs_right.core_id}"
-            proc_right = (cs_right.top_proc[:15] if cs_right.top_proc else C.DIM + '—' + C.RESET)
-            right_line = (
-                f"  {C.DIM}{core_name_right:<6}{C.RESET} "
-                f"{cs_right.usage:>5.1f}%  "
-                f"{usage_bar(cs_right.usage, width=22)}  "
-                f"{label_color(cs_right.label):<6}  "
-                f"{C.MAGENTA}{proc_right:<16}{C.RESET}"
-            )
-        else:
-            right_line = ""
-        
-        print(left_line + right_line)
-    
-    hot  = sum(1 for c in core_stats if c.label == "HOT")
-    cold = sum(1 for c in core_stats if c.label == "COLD")
-    warm = sum(1 for c in core_stats if c.label == "WARM")
-    
-    by_physical = {}
+
+    by_physical: dict = {}
     for logical_id, topo in topology.items():
         if topo.physical_id not in by_physical:
             by_physical[topo.physical_id] = []
         by_physical[topo.physical_id].append(topo)
-    
+
     total_physical = len(by_physical)
     total_physical_cores = sum(
         len(set(t.core_id for t in cores)) for cores in by_physical.values()
     )
     ht_enabled = total_cores > total_physical_cores
-    
+
+    if ht_enabled:
+        # ── Two-column layout for HT servers ──────────────────────────────
+        left_count = (total_cores + 1) // 2
+        print(f"\n  {'Core':<6} {'Usage':>6}  {'Bar':<22}  {'Status':<6}  {'Process':<16}  "
+              f"{'Core':<6} {'Usage':>6}  {'Bar':<22}  {'Status':<6}  {'Process':<16}")
+        print(f"  {'────':<6} {'─────':>6}  {'──────────────────────':<22}  {'──────':<6}  {'────────────────':<16}  "
+              f"{'────':<6} {'─────':>6}  {'──────────────────────':<22}  {'──────':<6}  {'────────────────':<16}")
+
+        for i in range(left_count):
+            left_id  = i
+            right_id = i + left_count
+
+            if left_id in stats_map:
+                cs_l = stats_map[left_id]
+                proc_l = cs_l.top_proc[:15] if cs_l.top_proc else C.DIM + '—' + C.RESET
+                left_line = (
+                    f"  {C.DIM}CPU{cs_l.core_id:<3}{C.RESET} "
+                    f"{cs_l.usage:>5.1f}%  "
+                    f"{usage_bar(cs_l.usage, width=22)}  "
+                    f"{label_color(cs_l.label):<6}  "
+                    f"{C.MAGENTA}{proc_l:<16}{C.RESET}"
+                )
+            else:
+                left_line = " " * 68
+
+            if right_id < total_cores and right_id in stats_map:
+                cs_r = stats_map[right_id]
+                proc_r = cs_r.top_proc[:15] if cs_r.top_proc else C.DIM + '—' + C.RESET
+                right_line = (
+                    f"  {C.DIM}CPU{cs_r.core_id:<3}{C.RESET} "
+                    f"{cs_r.usage:>5.1f}%  "
+                    f"{usage_bar(cs_r.usage, width=22)}  "
+                    f"{label_color(cs_r.label):<6}  "
+                    f"{C.MAGENTA}{proc_r:<16}{C.RESET}"
+                )
+            else:
+                right_line = ""
+
+            print(left_line + right_line)
+    else:
+        # ── Single-column layout for non-HT servers ────────────────────────
+        print(f"\n  {'Core':<6} {'Usage':>6}  {'Bar':<22}  {'Status':<6}  {'Process':<16}")
+        print(f"  {'────':<6} {'─────':>6}  {'──────────────────────':<22}  {'──────':<6}  {'────────────────':<16}")
+
+        for i in range(total_cores):
+            if i in stats_map:
+                cs = stats_map[i]
+                proc = cs.top_proc[:15] if cs.top_proc else C.DIM + '—' + C.RESET
+                print(
+                    f"  {C.DIM}CPU{cs.core_id:<3}{C.RESET} "
+                    f"{cs.usage:>5.1f}%  "
+                    f"{usage_bar(cs.usage, width=22)}  "
+                    f"{label_color(cs.label):<6}  "
+                    f"{C.MAGENTA}{proc:<16}{C.RESET}"
+                )
+
+    hot  = sum(1 for c in core_stats if c.label == "HOT")
+    warm = sum(1 for c in core_stats if c.label == "WARM")
+    cold = sum(1 for c in core_stats if c.label == "COLD")
+
     print(f"\n  Summary: {C.RED}●{C.RESET} {hot} Hot  "
           f"{C.YELLOW}●{C.RESET} {warm} Warm  "
           f"{C.CYAN}●{C.RESET} {cold} Cold  {C.DIM}|{C.RESET}  "
           f"{total_physical} physical CPU(s), "
           f"{total_physical_cores} physical core(s), "
           f"{total_cores} logical core(s)")
-    
+
     if ht_enabled:
         print(f"  Hyperthreading: {C.GREEN}Enabled{C.RESET}")
     else:
@@ -808,7 +823,7 @@ def _fetch_process_info(pid: int, num_cores: int) -> Optional[ProcessInfo]:
         threads=threads
     )
 
-def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Optional[list[int]] = None, show_cpu_freq: bool = False, export_html: Optional[str] = None, export_text: Optional[str] = None, sysinfo: Optional[SystemInfo] = None, topology_data: Optional[dict] = None):
+def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Optional[list[int]] = None, show_cpu_freq: bool = False, export_html: Optional[str] = None, export_text: Optional[str] = None, export_excel: Optional[str] = None, sysinfo: Optional[SystemInfo] = None, topology_data: Optional[dict] = None):
     """
     Live monitoring mode - refresh stats every interval_ms for duration_sec iterations.
     CPU is sampled for SAMPLE_MS (fast), then the screen is shown for the remaining
@@ -823,7 +838,7 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
     num_cores = len(topology)
 
     iterations = duration_sec
-    snapshots = [] if (export_html or export_text) else None
+    snapshots = [] if (export_html or export_text or export_excel) else None
 
     for i in range(iterations):
         # ── 1. Sample CPU (happens invisibly, screen still showing previous frame) ──
@@ -890,6 +905,13 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
                 print(f"  {C.GREEN}✔{C.RESET}  Text report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
             except Exception as e:
                 print(f"  {C.RED}✘{C.RESET}  Text export failed: {e}\n")
+
+        if export_excel:
+            try:
+                filename = export_to_excel(sysinfo, topology, core_stats, [], export_excel, snapshots=snapshots)
+                print(f"  {C.GREEN}✔{C.RESET}  Excel report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
+            except Exception as e:
+                print(f"  {C.RED}✘{C.RESET}  Excel export failed: {e}\n")
 
 def print_process_details_live(proc: ProcessInfo):
     """Print a single process's thread details during live monitoring (no affinity mask)."""
@@ -1098,31 +1120,42 @@ def export_to_html(
                 <div class="summary-item">{total_cores} Logical Cores</div>
                 <div class="summary-item">HT: {'Enabled' if ht_enabled else 'Disabled'}</div>
             </div>
-            <div class="two-column">
 """
-        
-        for col_start, col_end in [(0, left_count), (left_count, total_cores)]:
-            s += """
-                <table>
-                    <thead><tr><th>Core</th><th>Usage</th><th>Bar</th><th>Status</th><th>Process</th></tr></thead>
-                    <tbody>
-"""
-            for i in range(col_start, col_end):
+
+        def _core_row(cs):
+            lc = cs.label.lower()
+            return (
+                f"                        <tr>\n"
+                f"                            <td>CPU{cs.core_id}</td>\n"
+                f"                            <td>{cs.usage:.1f}%</td>\n"
+                f"                            <td><div class=\"bar\"><div class=\"bar-fill {lc}\" style=\"width:{cs.usage}%\"></div></div></td>\n"
+                f"                            <td><span class=\"status {lc}\">{cs.label}</span></td>\n"
+                f"                            <td><span class=\"process-name\">{cs.top_proc or '&#8212;'}</span></td>\n"
+                f"                        </tr>\n"
+            )
+
+        if ht_enabled:
+            # Two tables side-by-side for HT servers
+            s += '            <div class="two-column">\n'
+            for col_start, col_end in [(0, left_count), (left_count, total_cores)]:
+                s += "                <table>\n"
+                s += "                    <thead><tr><th>Core</th><th>Usage</th><th>Bar</th><th>Status</th><th>Process</th></tr></thead>\n"
+                s += "                    <tbody>\n"
+                for i in range(col_start, col_end):
+                    if i in stats_map:
+                        s += _core_row(stats_map[i])
+                s += "                    </tbody>\n                </table>\n"
+            s += "            </div>\n"
+        else:
+            # Single table for non-HT servers
+            s += "            <table>\n"
+            s += "                <thead><tr><th>Core</th><th>Usage</th><th>Bar</th><th>Status</th><th>Process</th></tr></thead>\n"
+            s += "                <tbody>\n"
+            for i in range(total_cores):
                 if i in stats_map:
-                    cs = stats_map[i]
-                    lc = cs.label.lower()
-                    s += f"""
-                        <tr>
-                            <td>CPU{cs.core_id}</td>
-                            <td>{cs.usage:.1f}%</td>
-                            <td><div class="bar"><div class="bar-fill {lc}" style="width:{cs.usage}%"></div></div></td>
-                            <td><span class="status {lc}">{cs.label}</span></td>
-                            <td><span class="process-name">{cs.top_proc or '&#8212;'}</span></td>
-                        </tr>
-"""
-            s += "                    </tbody>\n                </table>\n"
-        
-        s += "            </div>\n"
+                    s += _core_row(stats_map[i])
+            s += "                </tbody>\n            </table>\n"
+
         return s
     
     if snapshots:
@@ -1264,6 +1297,201 @@ def export_to_text(
     
     return filename
 
+def export_to_excel(
+    sysinfo: SystemInfo,
+    topology: dict[int, CPUTopology],
+    core_stats: list[CoreStat],
+    processes: list[ProcessInfo],
+    filename: str = "tidycpu_report.xlsx",
+    snapshots: Optional[list[Snapshot]] = None
+):
+    """Export report to an Excel (.xlsx) file using openpyxl."""
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        from openpyxl.formatting.rule import DataBarRule
+    except ImportError:
+        raise RuntimeError(
+            "openpyxl is required for Excel export. "
+            "Install it with:  pip install openpyxl"
+        )
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ── Colour helpers ───────────────────────────────────────────────────────
+    def _fill(hex_color: str) -> PatternFill:
+        return PatternFill("solid", fgColor=hex_color)
+
+    def _font(hex_color: str = "000000", bold: bool = False,
+              italic: bool = False, size: int = 11) -> Font:
+        return Font(color=hex_color, bold=bold, italic=italic, size=size)
+
+    def _border() -> Border:
+        side = Side(style="thin", color="CCCCCC")
+        return Border(left=side, right=side, top=side, bottom=side)
+
+    def _center() -> Alignment:
+        return Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    FILL_HEADER  = _fill("1E3A5F")
+    FILL_ALT_ROW = _fill("F2F2F2")
+    FILL_HOT     = _fill("F44336")
+    FILL_WARM    = _fill("FF9800")
+    FILL_COLD    = _fill("4CAF50")
+    FONT_HDR     = _font("FFFFFF", bold=True)
+    FONT_TITLE   = _font("1E3A5F", bold=True, size=14)
+    FONT_WHITE   = _font("FFFFFF", bold=True)
+    FONT_DIM     = _font("666666", italic=True)
+
+    STATUS_STYLE = {
+        "HOT":  (FILL_HOT,  FONT_WHITE),
+        "WARM": (FILL_WARM, FONT_WHITE),
+        "COLD": (FILL_COLD, FONT_WHITE),
+    }
+
+    def _auto_width(ws):
+        for col in ws.columns:
+            col_letter = get_column_letter(col[0].column)
+            max_len = max(
+                (len(str(cell.value)) for cell in col if cell.value is not None),
+                default=8,
+            )
+            ws.column_dimensions[col_letter].width = min(max(max_len + 4, 10), 55)
+
+    def _set_header_row(ws, row: int, headers: list[str]):
+        ws.row_dimensions[row].height = 20
+        for col, h in enumerate(headers, 1):
+            cell = ws.cell(row=row, column=col, value=h)
+            cell.font      = FONT_HDR
+            cell.fill      = FILL_HEADER
+            cell.border    = _border()
+            cell.alignment = _center()
+
+    # ── Detect HT ────────────────────────────────────────────────────────────
+    by_physical: dict = {}
+    for _lid, topo in topology.items():
+        by_physical.setdefault(topo.physical_id, []).append(topo)
+
+    total_physical       = len(by_physical)
+    total_physical_cores = sum(len(set(t.core_id for t in v)) for v in by_physical.values())
+    total_logical        = len(topology)
+    ht_enabled           = total_logical > total_physical_cores
+
+    # ── Workbook ──────────────────────────────────────────────────────────────
+    wb = openpyxl.Workbook()
+
+    # ── Sheet 1: System Information ───────────────────────────────────────────
+    ws_info = wb.active
+    ws_info.title = "System Info"
+    ws_info.column_dimensions["A"].width = 24
+    ws_info.column_dimensions["B"].width = 62
+
+    ws_info["A1"] = "TidyCPU — CPU Affinity Optimization Report"
+    ws_info["A1"].font = FONT_TITLE
+    ws_info.merge_cells("A1:B1")
+
+    ws_info["A2"] = f"Generated: {timestamp}"
+    ws_info["A2"].font = FONT_DIM
+    ws_info.merge_cells("A2:B2")
+
+    info_rows = [
+        ("CPU Model",         sysinfo.cpu_model),
+        ("Total Memory",      sysinfo.total_memory),
+        ("Available Memory",  sysinfo.available_memory),
+        ("Kernel Cmdline",    sysinfo.kernel_cmdline),
+        ("Physical CPU(s)",   total_physical),
+        ("Physical Core(s)",  total_physical_cores),
+        ("Logical Core(s)",   total_logical),
+        ("Hyperthreading",    "Enabled" if ht_enabled else "Disabled"),
+    ]
+    if sysinfo.cpu_freq_cur is not None:
+        if sysinfo.cpu_freq_min and sysinfo.cpu_freq_max:
+            info_rows.append(("CPU Freq Range",
+                               f"{sysinfo.cpu_freq_min:.0f} – {sysinfo.cpu_freq_max:.0f} MHz"))
+        info_rows.append(("CPU Freq Current", f"{sysinfo.cpu_freq_cur:.0f} MHz"))
+
+    _set_header_row(ws_info, 4, ["Property", "Value"])
+    for r_idx, (prop, val) in enumerate(info_rows, start=5):
+        cell_a = ws_info.cell(row=r_idx, column=1, value=prop)
+        cell_b = ws_info.cell(row=r_idx, column=2, value=str(val))
+        cell_a.font = _font(bold=True)
+        if r_idx % 2 == 0:
+            cell_a.fill = FILL_ALT_ROW
+            cell_b.fill = FILL_ALT_ROW
+        cell_a.border = _border()
+        cell_b.border = _border()
+        cell_b.alignment = Alignment(wrap_text=True, vertical="center")
+
+    # ── Helper: write one topology sheet ─────────────────────────────────────
+    def _write_topology_sheet(ws, core_stats_data: list[CoreStat]):
+        headers = ["Core", "Usage (%)", "Status", "Top Process"]
+        _set_header_row(ws, 1, headers)
+
+        for row_idx, cs in enumerate(
+                sorted(core_stats_data, key=lambda x: x.core_id), start=2):
+            ws.cell(row=row_idx, column=1, value=f"CPU{cs.core_id}").border = _border()
+            usage_cell = ws.cell(row=row_idx, column=2, value=round(cs.usage, 1))
+            usage_cell.border    = _border()
+            usage_cell.alignment = _center()
+
+            status_cell = ws.cell(row=row_idx, column=3, value=cs.label)
+            status_cell.border    = _border()
+            status_cell.alignment = _center()
+            if cs.label in STATUS_STYLE:
+                status_cell.fill, status_cell.font = STATUS_STYLE[cs.label]
+
+            proc_cell = ws.cell(row=row_idx, column=4,
+                                value=cs.top_proc if cs.top_proc else "—")
+            proc_cell.border = _border()
+
+            if row_idx % 2 == 0:
+                for c in [1, 2, 4]:
+                    ws.cell(row=row_idx, column=c).fill = FILL_ALT_ROW
+
+        # Native Excel data-bar on the Usage column
+        last_row = len(core_stats_data) + 1
+        if last_row >= 2:
+            ws.conditional_formatting.add(
+                f"B2:B{last_row}",
+                DataBarRule(start_type="num", start_value=0,
+                            end_type="num", end_value=100,
+                            color="4472C4"),
+            )
+        _auto_width(ws)
+
+    # ── Write snapshot sheets (or single topology sheet) ─────────────────────
+    if snapshots:
+        for snap in snapshots:
+            sheet_name = f"Snap {snap.iteration} ({snap.timestamp.split()[1].replace(':', '-')})"
+            ws_snap = wb.create_sheet(title=sheet_name[:31])   # Excel: max 31 chars
+            _write_topology_sheet(ws_snap, snap.core_stats)
+    else:
+        ws_topo = wb.create_sheet(title="CPU Topology")
+        _write_topology_sheet(ws_topo, core_stats)
+
+    # ── Sheet: Processes ──────────────────────────────────────────────────────
+    if processes:
+        ws_proc = wb.create_sheet(title="Processes")
+        proc_headers = ["PID", "Name", "CPU (%)", "Cores", "Affinity Mask"]
+        _set_header_row(ws_proc, 1, proc_headers)
+
+        for row_idx, proc in enumerate(processes, start=2):
+            cores_str = (", ".join(map(str, proc.current_cores))
+                         if proc.current_cores else "all")
+            row_data = [proc.pid, proc.name,
+                        round(proc.cpu_percent, 1), cores_str, proc.affinity_mask]
+            for col_idx, val in enumerate(row_data, start=1):
+                cell = ws_proc.cell(row=row_idx, column=col_idx, value=val)
+                cell.border = _border()
+                if row_idx % 2 == 0:
+                    cell.fill = FILL_ALT_ROW
+        _auto_width(ws_proc)
+
+    wb.save(filename)
+    return filename
+
+
 # ─────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
@@ -1282,6 +1510,7 @@ Examples:
   sudo python3 tidycpu.py --pid "1234|nginx|5678"  # Mix of PIDs and names
   sudo python3 tidycpu.py --cpu-freq               # Include CPU frequency info
   sudo python3 tidycpu.py --export-html report.html  # Export to HTML
+  sudo python3 tidycpu.py --export-excel report.xlsx # Export to Excel (requires openpyxl)
         """
     )
     parser.add_argument("--live", "-l", action="store_true",
@@ -1300,6 +1529,8 @@ Examples:
         help="Export report to HTML file (e.g., report.html)")
     parser.add_argument("--export-text", type=str, metavar="FILE",
         help="Export report to text file (e.g., report.txt)")
+    parser.add_argument("--export-excel", type=str, metavar="FILE",
+        help="Export report to Excel file (e.g., report.xlsx)  [requires openpyxl]")
     
     args = parser.parse_args()
     
@@ -1405,6 +1636,7 @@ Examples:
                 show_cpu_freq=args.cpu_freq,
                 export_html=args.export_html,
                 export_text=args.export_text,
+                export_excel=args.export_excel,
                 sysinfo=sysinfo,
                 topology_data=topology
             )
@@ -1443,6 +1675,15 @@ Examples:
             print(f"\n  {C.GREEN}✔{C.RESET}  Text report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
             print(f"\n  {C.RED}✘{C.RESET}  Text export failed: {e}")
+
+    if args.export_excel:
+        try:
+            if not processes:
+                processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
+            filename = export_to_excel(sysinfo, topology, core_stats, processes, args.export_excel)
+            print(f"\n  {C.GREEN}✔{C.RESET}  Excel report exported to: {C.CYAN}{filename}{C.RESET}")
+        except Exception as e:
+            print(f"\n  {C.RED}✘{C.RESET}  Excel export failed: {e}")
 
     if args.threads:
         actions = build_rebalance_plan(core_stats, processes)
