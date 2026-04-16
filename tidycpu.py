@@ -1359,10 +1359,10 @@ def export_to_excel(
             )
             ws.column_dimensions[col_letter].width = min(max(max_len + 4, 10), 55)
 
-    def _set_header_row(ws, row: int, headers: list[str]):
+    def _set_header_row(ws, row: int, headers: list[str], start_col: int = 1):
         ws.row_dimensions[row].height = 20
-        for col, h in enumerate(headers, 1):
-            cell = ws.cell(row=row, column=col, value=h)
+        for offset, h in enumerate(headers):
+            cell = ws.cell(row=row, column=start_col + offset, value=h)
             cell.font      = FONT_HDR
             cell.fill      = FILL_HEADER
             cell.border    = _border()
@@ -1424,41 +1424,81 @@ def export_to_excel(
         cell_b.alignment = Alignment(wrap_text=True, vertical="center")
 
     # ── Helper: write one topology sheet ─────────────────────────────────────
+    def _write_core_row(ws, row_idx: int, cs: CoreStat, col: int, alt: bool):
+        """Write a single core row starting at column `col`."""
+        c0 = ws.cell(row=row_idx, column=col,     value=f"CPU{cs.core_id}")
+        c1 = ws.cell(row=row_idx, column=col + 1, value=round(cs.usage, 1))
+        c2 = ws.cell(row=row_idx, column=col + 2, value=cs.label)
+        c3 = ws.cell(row=row_idx, column=col + 3,
+                     value=cs.top_proc if cs.top_proc else "—")
+
+        for cell in (c0, c1, c2, c3):
+            cell.border = _border()
+        c1.alignment = _center()
+        c2.alignment = _center()
+
+        if cs.label in STATUS_STYLE:
+            c2.fill, c2.font = STATUS_STYLE[cs.label]
+
+        if alt:
+            for cell in (c0, c1, c3):
+                cell.fill = FILL_ALT_ROW
+
     def _write_topology_sheet(ws, core_stats_data: list[CoreStat]):
         headers = ["Core", "Usage (%)", "Status", "Top Process"]
-        _set_header_row(ws, 1, headers)
+        sorted_stats = sorted(core_stats_data, key=lambda x: x.core_id)
+        total        = len(sorted_stats)
 
-        for row_idx, cs in enumerate(
-                sorted(core_stats_data, key=lambda x: x.core_id), start=2):
-            ws.cell(row=row_idx, column=1, value=f"CPU{cs.core_id}").border = _border()
-            usage_cell = ws.cell(row=row_idx, column=2, value=round(cs.usage, 1))
-            usage_cell.border    = _border()
-            usage_cell.alignment = _center()
+        if ht_enabled and total >= 2:
+            # ── Two-table side-by-side layout (mirrors the terminal HT view) ──
+            # Left table : cols 1-4  (physical cores — first half)
+            # Col 5      : blank separator
+            # Right table: cols 6-9  (HT siblings — second half)
+            left_count   = (total + 1) // 2
+            left_stats   = sorted_stats[:left_count]
+            right_stats  = sorted_stats[left_count:]
 
-            status_cell = ws.cell(row=row_idx, column=3, value=cs.label)
-            status_cell.border    = _border()
-            status_cell.alignment = _center()
-            if cs.label in STATUS_STYLE:
-                status_cell.fill, status_cell.font = STATUS_STYLE[cs.label]
+            _set_header_row(ws, 1, headers, start_col=1)
+            _set_header_row(ws, 1, headers, start_col=6)
 
-            proc_cell = ws.cell(row=row_idx, column=4,
-                                value=cs.top_proc if cs.top_proc else "—")
-            proc_cell.border = _border()
+            for row_idx, cs in enumerate(left_stats,  start=2):
+                _write_core_row(ws, row_idx, cs, col=1, alt=(row_idx % 2 == 0))
 
-            if row_idx % 2 == 0:
-                for c in [1, 2, 4]:
-                    ws.cell(row=row_idx, column=c).fill = FILL_ALT_ROW
+            for row_idx, cs in enumerate(right_stats, start=2):
+                _write_core_row(ws, row_idx, cs, col=6, alt=(row_idx % 2 == 0))
 
-        # Native Excel data-bar on the Usage column
-        last_row = len(core_stats_data) + 1
-        if last_row >= 2:
-            ws.conditional_formatting.add(
-                f"B2:B{last_row}",
-                DataBarRule(start_type="num", start_value=0,
-                            end_type="num", end_value=100,
-                            color="4472C4"),
-            )
-        _auto_width(ws)
+            # Data bars — left: column B (2), right: column G (7)
+            if left_count >= 1:
+                ws.conditional_formatting.add(
+                    f"B2:B{left_count + 1}",
+                    DataBarRule(start_type="num", start_value=0,
+                                end_type="num", end_value=100, color="4472C4"),
+                )
+            if right_stats:
+                ws.conditional_formatting.add(
+                    f"G2:G{len(right_stats) + 1}",
+                    DataBarRule(start_type="num", start_value=0,
+                                end_type="num", end_value=100, color="4472C4"),
+                )
+
+            # Column widths: set manually (auto_width breaks on merged/offset tables)
+            for col_letter, width in zip("ABCDEFGHI", [9, 11, 9, 20, 3, 9, 11, 9, 20]):
+                ws.column_dimensions[col_letter].width = width
+
+        else:
+            # ── Single-table layout for non-HT servers ────────────────────────
+            _set_header_row(ws, 1, headers)
+
+            for row_idx, cs in enumerate(sorted_stats, start=2):
+                _write_core_row(ws, row_idx, cs, col=1, alt=(row_idx % 2 == 0))
+
+            if total >= 1:
+                ws.conditional_formatting.add(
+                    f"B2:B{total + 1}",
+                    DataBarRule(start_type="num", start_value=0,
+                                end_type="num", end_value=100, color="4472C4"),
+                )
+            _auto_width(ws)
 
     # ── Write snapshot sheets (or single topology sheet) ─────────────────────
     if snapshots:
