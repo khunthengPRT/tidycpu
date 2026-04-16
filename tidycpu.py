@@ -1463,7 +1463,7 @@ def export_to_excel(
     # ── Write snapshot sheets (or single topology sheet) ─────────────────────
     if snapshots:
         for snap in snapshots:
-            sheet_name = f"Snap {snap.iteration} ({snap.timestamp.split()[1]})"
+            sheet_name = f"Snap {snap.iteration} ({snap.timestamp.split()[1].replace(':', '-')})"
             ws_snap = wb.create_sheet(title=sheet_name[:31])   # Excel: max 31 chars
             _write_topology_sheet(ws_snap, snap.core_stats)
     else:
