@@ -66,6 +66,7 @@ class CoreStat:
     physical_id: Optional[int] = None
     core_within_physical: Optional[int] = None
     top_proc: str     = ""  # name of the busiest process/thread on this core
+    top_parent: str   = ""  # name of the parent process owning that thread
 
 @dataclass
 class ThreadInfo:
@@ -369,14 +370,14 @@ def read_proc_stat() -> dict[int, dict]:
         die("/proc/stat not found. Are you on Linux?")
     return cores
 
-def get_top_proc_per_core() -> dict[int, str]:
+def get_top_proc_per_core() -> dict[int, tuple[str, str]]:
     """
     Read /proc/*/stat and /proc/*/task/*/stat to find the process or thread
     with the highest recent CPU time on each logical core.
-    Returns a dict mapping core_id -> "name" of the busiest task.
+    Returns a dict mapping core_id -> (thread_name, parent_process_name).
     """
-    # Maps core_id -> (max_cputime, name)
-    best: dict[int, tuple[int, str]] = {}
+    # Maps core_id -> (max_cputime, thread_name, parent_name)
+    best: dict[int, tuple[int, str, str]] = {}
 
     try:
         pids = [p for p in os.listdir("/proc") if p.isdigit()]
@@ -386,6 +387,14 @@ def get_top_proc_per_core() -> dict[int, str]:
     for pid_str in pids:
         pid = int(pid_str)
         task_dir = f"/proc/{pid}/task"
+
+        # Read parent process name once per PID
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                parent_name = f.read().strip()[:15]
+        except (FileNotFoundError, PermissionError):
+            parent_name = ""
+
         try:
             tids = [t for t in os.listdir(task_dir) if t.isdigit()]
         except (FileNotFoundError, PermissionError):
@@ -419,11 +428,11 @@ def get_top_proc_per_core() -> dict[int, str]:
 
                 cur_best = best.get(last_cpu)
                 if cur_best is None or cpu_time > cur_best[0]:
-                    best[last_cpu] = (cpu_time, name)
+                    best[last_cpu] = (cpu_time, name, parent_name)
             except (FileNotFoundError, PermissionError, ValueError, IndexError):
                 continue
 
-    return {core: name for core, (_, name) in best.items()}
+    return {core: (name, parent) for core, (_, name, parent) in best.items()}
 
 
 def get_core_usage(sample_ms: int = 500, topology: Optional[dict] = None) -> list[CoreStat]:
@@ -464,10 +473,10 @@ def get_core_usage(sample_ms: int = 500, topology: Optional[dict] = None) -> lis
             core_within_physical=core_in_phys
         ))
 
-    # Populate top_proc from /proc after both snapshots are done
+    # Populate top_proc and top_parent from /proc after both snapshots are done
     top_procs = get_top_proc_per_core()
     for cs in stats:
-        cs.top_proc = top_procs.get(cs.core_id, "")
+        cs.top_proc, cs.top_parent = top_procs.get(cs.core_id, ("", ""))
 
     return stats
 
@@ -695,20 +704,94 @@ def print_system_info(sysinfo: SystemInfo):
     else:
         print(f"    {C.DIM}{cmdline}{C.RESET}")
 
-def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat]):
-    """Print CPU topology — two-column for HT servers, single-column otherwise."""
-    print(f"\n{C.BOLD}{'─'*78}{C.RESET}")
-    print(f"{C.BOLD}  CPU TOPOLOGY{C.RESET}")
-    print(f"{C.BOLD}{'─'*78}{C.RESET}")
+# ── Table rendering helpers ────────────────────────────────────────────────────
+
+# Column display widths (visible characters, excluding border/padding)
+_COL_WIDTHS: dict[str, int] = {
+    "Bar":     22,
+    "Usage":   6,
+    "Process": 15,
+    "Parent":  15,
+    "Core":    5,
+}
+
+# Default column order: left half outside→center, right half center→outside
+_LEFT_ORDER  = ["Bar", "Usage", "Process", "Parent", "Core"]
+_RIGHT_ORDER = ["Core", "Parent", "Process", "Usage", "Bar"]
+
+# Dark-mode border color (dark gray)
+_BD = "\033[90m"
+
+def _hdr_color(col: str) -> str:
+    return {"Bar": C.DIM, "Usage": C.RED, "Process": C.BLUE,
+            "Parent": C.MAGENTA, "Core": C.CYAN}.get(col, "")
+
+def _tbl_line(cols: list[str], lc: str, mc: str, rc: str) -> str:
+    """Build a horizontal border line (top / separator / bottom)."""
+    parts = [_BD + lc]
+    for i, col in enumerate(cols):
+        parts.append("─" * (_COL_WIDTHS[col] + 2))
+        parts.append(mc if i < len(cols) - 1 else rc + C.RESET)
+    return "".join(parts)
+
+def _tbl_header(cols: list[str]) -> str:
+    """Build the header row with colored column labels."""
+    bd = _BD + "│" + C.RESET
+    parts = [bd]
+    for col in cols:
+        w = _COL_WIDTHS[col]
+        parts.append(f" {_hdr_color(col)}{C.BOLD}{col:^{w}}{C.RESET} " + bd)
+    return "".join(parts)
+
+def _render_cell(col: str, cs: Optional[CoreStat],
+                 is_right: bool = False, hl: bool = False) -> str:
+    """Render a single cell's content (no border chars)."""
+    w = _COL_WIDTHS[col]
+    pad = w + 2  # visible width including spaces
+    if cs is None:
+        return " " * pad
+    bold = C.BOLD if hl else ""
+    if col == "Bar":
+        return f" {usage_bar(cs.usage, width=w)} "
+    if col == "Usage":
+        clr = C.RED if cs.usage >= 80 else (C.YELLOW if cs.usage >= 40 else C.GREEN)
+        return f" {bold}{clr}{cs.usage:>5.1f}%{C.RESET} "
+    if col == "Process":
+        txt = (cs.top_proc or "—")[:w]
+        clr = C.WHITE if hl else C.BLUE
+        fmt = f">{w}" if is_right else f"<{w}"
+        return f" {bold}{clr}{txt:{fmt}}{C.RESET} "
+    if col == "Parent":
+        txt = (cs.top_parent or "—")[:w]
+        clr = C.WHITE if hl else C.MAGENTA
+        fmt = f">{w}" if is_right else f"<{w}"
+        return f" {bold}{clr}{txt:{fmt}}{C.RESET} "
+    if col == "Core":
+        txt = f"CPU{cs.core_id}"
+        fmt = f">{w}" if is_right else f"<{w}"
+        return f" {bold}{C.DIM}{txt:{fmt}}{C.RESET} "
+    return " " * pad
+
+def _tbl_row(cells: list[str]) -> str:
+    """Wrap pre-rendered cells with border characters."""
+    bd = _BD + "│" + C.RESET
+    return bd + bd.join(cells) + bd
+
+def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat],
+                   ignore_cols: Optional[list[str]] = None,
+                   specify_parents: Optional[list[str]] = None):
+    """Print CPU topology table — two-column for HT servers, single-column otherwise."""
+    ignored = {c.lower() for c in (ignore_cols or [])}
+    vis_left  = [c for c in _LEFT_ORDER  if c.lower() not in ignored]
+    vis_right = [c for c in _RIGHT_ORDER if c.lower() not in ignored]
+    spec_set  = set(specify_parents or [])
 
     stats_map = {cs.core_id: cs for cs in core_stats}
     total_cores = len(topology)
 
     by_physical: dict = {}
     for logical_id, topo in topology.items():
-        if topo.physical_id not in by_physical:
-            by_physical[topo.physical_id] = []
-        by_physical[topo.physical_id].append(topo)
+        by_physical.setdefault(topo.physical_id, []).append(topo)
 
     total_physical = len(by_physical)
     total_physical_cores = sum(
@@ -716,65 +799,47 @@ def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat])
     )
     ht_enabled = total_cores > total_physical_cores
 
+    print(f"\n{C.BOLD}  CPU TOPOLOGY{C.RESET}\n")
+
     if ht_enabled:
-        # ── Two-column layout for HT servers ──────────────────────────────
+        all_cols = vis_left + vis_right
         left_count = (total_cores + 1) // 2
-        print(f"\n  {'Core':<6} {'Usage':>6}  {'Bar':<22}  {'Status':<6}  {'Process':<16}  "
-              f"{'Core':<6} {'Usage':>6}  {'Bar':<22}  {'Status':<6}  {'Process':<16}")
-        print(f"  {'────':<6} {'─────':>6}  {'──────────────────────':<22}  {'──────':<6}  {'────────────────':<16}  "
-              f"{'────':<6} {'─────':>6}  {'──────────────────────':<22}  {'──────':<6}  {'────────────────':<16}")
+
+        print("  " + _tbl_line(all_cols, "┌", "┬", "┐"))
+        print("  " + _tbl_header(all_cols))
+        print("  " + _tbl_line(all_cols, "├", "┼", "┤"))
 
         for i in range(left_count):
-            left_id  = i
-            right_id = i + left_count
+            cs_l = stats_map.get(i)
+            cs_r = stats_map.get(i + left_count)
+            hl_l = bool(spec_set and cs_l and cs_l.top_parent in spec_set)
+            hl_r = bool(spec_set and cs_r and cs_r.top_parent in spec_set)
+            cells = (
+                [_render_cell(c, cs_l, is_right=False, hl=hl_l) for c in vis_left] +
+                [_render_cell(c, cs_r, is_right=True,  hl=hl_r) for c in vis_right]
+            )
+            print("  " + _tbl_row(cells))
 
-            if left_id in stats_map:
-                cs_l = stats_map[left_id]
-                proc_l = cs_l.top_proc[:15] if cs_l.top_proc else C.DIM + '—' + C.RESET
-                left_line = (
-                    f"  {C.DIM}CPU{cs_l.core_id:<3}{C.RESET} "
-                    f"{cs_l.usage:>5.1f}%  "
-                    f"{usage_bar(cs_l.usage, width=22)}  "
-                    f"{label_color(cs_l.label):<6}  "
-                    f"{C.MAGENTA}{proc_l:<16}{C.RESET}"
-                )
-            else:
-                left_line = " " * 68
-
-            if right_id < total_cores and right_id in stats_map:
-                cs_r = stats_map[right_id]
-                proc_r = cs_r.top_proc[:15] if cs_r.top_proc else C.DIM + '—' + C.RESET
-                right_line = (
-                    f"  {C.DIM}CPU{cs_r.core_id:<3}{C.RESET} "
-                    f"{cs_r.usage:>5.1f}%  "
-                    f"{usage_bar(cs_r.usage, width=22)}  "
-                    f"{label_color(cs_r.label):<6}  "
-                    f"{C.MAGENTA}{proc_r:<16}{C.RESET}"
-                )
-            else:
-                right_line = ""
-
-            print(left_line + right_line)
+        print("  " + _tbl_line(all_cols, "└", "┴", "┘"))
     else:
-        # ── Single-column layout for non-HT servers ────────────────────────
-        print(f"\n  {'Core':<6} {'Usage':>6}  {'Bar':<22}  {'Status':<6}  {'Process':<16}")
-        print(f"  {'────':<6} {'─────':>6}  {'──────────────────────':<22}  {'──────':<6}  {'────────────────':<16}")
+        print("  " + _tbl_line(vis_left, "┌", "┬", "┐"))
+        print("  " + _tbl_header(vis_left))
+        print("  " + _tbl_line(vis_left, "├", "┼", "┤"))
 
         for i in range(total_cores):
-            if i in stats_map:
-                cs = stats_map[i]
-                proc = cs.top_proc[:15] if cs.top_proc else C.DIM + '—' + C.RESET
-                print(
-                    f"  {C.DIM}CPU{cs.core_id:<3}{C.RESET} "
-                    f"{cs.usage:>5.1f}%  "
-                    f"{usage_bar(cs.usage, width=22)}  "
-                    f"{label_color(cs.label):<6}  "
-                    f"{C.MAGENTA}{proc:<16}{C.RESET}"
-                )
+            cs = stats_map.get(i)
+            hl = bool(spec_set and cs and cs.top_parent in spec_set)
+            cells = [_render_cell(c, cs, is_right=False, hl=hl) for c in vis_left]
+            print("  " + _tbl_row(cells))
+
+        print("  " + _tbl_line(vis_left, "└", "┴", "┘"))
 
     hot  = sum(1 for c in core_stats if c.label == "HOT")
     warm = sum(1 for c in core_stats if c.label == "WARM")
     cold = sum(1 for c in core_stats if c.label == "COLD")
+
+    if spec_set:
+        print(f"\n  {C.BOLD}Focused on:{C.RESET} {', '.join(sorted(spec_set))}")
 
     print(f"\n  Summary: {C.RED}●{C.RESET} {hot} Hot  "
           f"{C.YELLOW}●{C.RESET} {warm} Warm  "
@@ -783,10 +848,8 @@ def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat])
           f"{total_physical_cores} physical core(s), "
           f"{total_cores} logical core(s)")
 
-    if ht_enabled:
-        print(f"  Hyperthreading: {C.GREEN}Enabled{C.RESET}")
-    else:
-        print(f"  Hyperthreading: {C.DIM}Disabled{C.RESET}")
+    ht_status = f"{C.GREEN}Enabled{C.RESET}" if ht_enabled else f"{C.DIM}Disabled{C.RESET}"
+    print(f"  Hyperthreading: {ht_status}")
 
 def clear_screen():
     """Clear terminal screen."""
@@ -823,7 +886,7 @@ def _fetch_process_info(pid: int, num_cores: int) -> Optional[ProcessInfo]:
         threads=threads
     )
 
-def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Optional[list[int]] = None, show_cpu_freq: bool = False, export_html: Optional[str] = None, export_text: Optional[str] = None, export_excel: Optional[str] = None, sysinfo: Optional[SystemInfo] = None, topology_data: Optional[dict] = None):
+def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Optional[list[int]] = None, show_cpu_freq: bool = False, export_html: Optional[str] = None, export_text: Optional[str] = None, export_excel: Optional[str] = None, sysinfo: Optional[SystemInfo] = None, topology_data: Optional[dict] = None, ignore_cols: Optional[list[str]] = None, specify_parents: Optional[list[str]] = None):
     """
     Live monitoring mode - refresh stats every interval_ms for duration_sec iterations.
     CPU is sampled for SAMPLE_MS (fast), then the screen is shown for the remaining
@@ -863,7 +926,9 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
         print(f"\n  {C.CYAN}Live Monitor Mode{C.RESET} — {C.DIM}Refresh: {refresh_label}  "
               f"Iteration: {i+1}/{iterations}{C.RESET}")
 
-        print_topology(topology, core_stats)
+        print_topology(topology, core_stats,
+                       ignore_cols=ignore_cols,
+                       specify_parents=specify_parents)
 
         if filter_pids:
             label = " | ".join(str(p) for p in filter_pids)
@@ -1511,6 +1576,8 @@ Examples:
   sudo python3 tidycpu.py --cpu-freq               # Include CPU frequency info
   sudo python3 tidycpu.py --export-html report.html  # Export to HTML
   sudo python3 tidycpu.py --export-excel report.xlsx # Export to Excel (requires openpyxl)
+  sudo python3 tidycpu.py --live --ignore-col Bar    # Hide Bar column in live view
+  sudo python3 tidycpu.py --live --specify nginx,php-fpm  # Highlight rows for these parents
         """
     )
     parser.add_argument("--live", "-l", action="store_true",
@@ -1531,7 +1598,13 @@ Examples:
         help="Export report to text file (e.g., report.txt)")
     parser.add_argument("--export-excel", type=str, metavar="FILE",
         help="Export report to Excel file (e.g., report.xlsx)  [requires openpyxl]")
-    
+    parser.add_argument("--ignore-col", type=lambda s: [c.strip() for c in s.split(",")],
+        default=[], metavar="COLS",
+        help="Comma-separated columns to hide (e.g. Bar,Usage)")
+    parser.add_argument("--specify", type=lambda s: [p.strip() for p in s.split(",")],
+        default=None, metavar="PARENTS",
+        help="Highlight rows whose parent process matches these names (comma-separated)")
+
     args = parser.parse_args()
     
     print(BANNER)
@@ -1638,7 +1711,9 @@ Examples:
                 export_text=args.export_text,
                 export_excel=args.export_excel,
                 sysinfo=sysinfo,
-                topology_data=topology
+                topology_data=topology,
+                ignore_cols=args.ignore_col,
+                specify_parents=args.specify,
             )
         except KeyboardInterrupt:
             print(f"\n\n  {C.YELLOW}Monitoring interrupted.{C.RESET}\n")
@@ -1649,7 +1724,9 @@ Examples:
     core_stats = get_core_usage(sample_ms=500, topology=topology)
     print(f"\r  {C.GREEN}✔{C.RESET}  Core telemetry collected.          ")
 
-    print_topology(topology, core_stats)
+    print_topology(topology, core_stats,
+                   ignore_cols=args.ignore_col,
+                   specify_parents=args.specify)
 
     processes = []
 
