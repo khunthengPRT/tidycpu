@@ -1688,100 +1688,196 @@ def export_to_excel(
     # ── Helper: write one topology sheet ─────────────────────────────────────
     def _write_topology_sheet(ws, core_stats_data: list[CoreStat]):
         ignored = {c.lower() for c in (ignore_cols or [])}
+        show_databar = "bar" not in ignored
 
-        # Build ordered list of (excel_header, value_fn, col_type)
-        # "Bar" controls the DataBar on the Usage column — not a separate column.
-        all_col_defs = [
-            ("Core",      lambda cs: f"CPU{cs.core_id}",          "core"),
-            ("Usage (%)", lambda cs: round(cs.usage, 1),           "usage"),
-            ("Process",   lambda cs: cs.top_proc    or "—",        "process"),
-            ("Parent",    lambda cs: cs.top_parent  or "—",        "parent"),
-        ]
-        col_defs = [(hdr, fn, kind) for hdr, fn, kind in all_col_defs
-                    if kind not in ignored]
-        show_databar = "bar" not in ignored and any(k == "usage" for _, _, k in col_defs)
+        # name → (excel_header, value_fn, kind)
+        COL_META = {
+            "Core":    ("Core",      lambda cs: f"CPU{cs.core_id}", "core"),
+            "Usage":   ("Usage (%)", lambda cs: round(cs.usage, 1), "usage"),
+            "Process": ("Process",   lambda cs: cs.top_proc or "—", "process"),
+            "Parent":  ("Parent",    lambda cs: cs.top_parent or "—", "parent"),
+        }
 
-        headers = [h for h, _, _ in col_defs]
-        if stack_procs:
-            headers = ["Core", "Usage (%)", "Process", "Parent", "Type"]
-        _set_header_row(ws, 1, headers)
-
-        row_idx = 2
-        for cs in sorted(core_stats_data, key=lambda x: x.core_id):
-            # ── Main core row ─────────────────────────────────────────────────
-            for col_idx, (_, fn, kind) in enumerate(col_defs, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=fn(cs))
-                cell.border = _border()
-                if kind == "core":
+        def _apply_cell_style(cell, kind: str, cs: CoreStat, row_idx: int):
+            cell.border = _border()
+            if kind == "core":
+                cell.alignment = _center()
+                if cs.label in STATUS_STYLE:
+                    cell.fill, cell.font = STATUS_STYLE[cs.label]
+            else:
+                if kind == "usage":
                     cell.alignment = _center()
-                    if cs.label in STATUS_STYLE:
-                        cell.fill, cell.font = STATUS_STYLE[cs.label]
-                elif kind == "usage":
-                    cell.alignment = _center()
-                if row_idx % 2 == 0 and kind != "core":
+                if row_idx % 2 == 0:
                     cell.fill = FILL_ALT_ROW
 
-            if stack_procs:
-                # Write "Top" label in the Type column (one past col_defs)
-                type_col = len(col_defs) + 1
-                type_cell = ws.cell(row=row_idx, column=type_col, value="top")
-                type_cell.font = _font("1E3A5F", bold=True)
-                type_cell.border = _border()
-                type_cell.alignment = _center()
-            row_idx += 1
+        def _write_stacked_cell(row_idx: int, col: int, kind: str, value):
+            cell = ws.cell(row=row_idx, column=col, value=value)
+            cell.font = FONT_STACKED
+            cell.fill = FILL_STACKED
+            cell.border = _border()
+            if kind in ("core", "usage"):
+                cell.alignment = _center()
 
-            # ── Stacked sub-rows (one per process in all_procs) ───────────────
-            if stack_procs:
-                col_map = {kind: idx for idx, (_, _, kind) in enumerate(col_defs, start=1)}
-                type_col = len(col_defs) + 1
-                for thread_name, parent_name, cpu_pct in cs.all_procs:
-                    # Core cell: empty (already identified by the main row above)
-                    if "core" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["core"], value="")
-                        c.border = _border()
-                        c.alignment = _center()
-                    # Usage: per-thread CPU%
-                    if "usage" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["usage"],
-                                    value=round(cpu_pct, 1))
-                        c.font = FONT_STACKED
-                        c.fill = FILL_STACKED
-                        c.border = _border()
-                        c.alignment = _center()
-                    # Process
-                    if "process" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["process"],
-                                    value=thread_name or "—")
-                        c.font = FONT_STACKED
-                        c.fill = FILL_STACKED
-                        c.border = _border()
-                    # Parent
-                    if "parent" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["parent"],
-                                    value=parent_name or "—")
-                        c.font = FONT_STACKED
-                        c.fill = FILL_STACKED
-                        c.border = _border()
-                    # Type label
-                    tc = ws.cell(row=row_idx, column=type_col, value="stacked")
-                    tc.font = FONT_STACKED
-                    tc.fill = FILL_STACKED
-                    tc.border = _border()
-                    tc.alignment = _center()
-                    row_idx += 1
+        def _add_databars(col_names: list[str], last_row: int):
+            for col_idx, name in enumerate(col_names, 1):
+                if name == "Usage":
+                    letter = get_column_letter(col_idx)
+                    ws.conditional_formatting.add(
+                        f"{letter}2:{letter}{last_row}",
+                        DataBarRule(start_type="num", start_value=0,
+                                    end_type="num", end_value=100,
+                                    color="4472C4"),
+                    )
 
-        # Native DataBar on the Usage column (only when Bar is not hidden)
-        if show_databar:
-            usage_col_idx = next(i for i, (_, _, k) in enumerate(col_defs, 1) if k == "usage")
-            usage_letter  = get_column_letter(usage_col_idx)
-            last_row = row_idx - 1
-            if last_row >= 2:
-                ws.conditional_formatting.add(
-                    f"{usage_letter}2:{usage_letter}{last_row}",
-                    DataBarRule(start_type="num", start_value=0,
-                                end_type="num", end_value=100,
-                                color="4472C4"),
-                )
+        def _stacked_val(kind: str, t_name: str, p_name: str, cpu_pct: float):
+            if kind == "core":    return ""
+            if kind == "usage":   return round(cpu_pct, 1)
+            if kind == "process": return t_name or "—"
+            return p_name or "—"   # parent
+
+        sorted_cores = sorted(core_stats_data, key=lambda x: x.core_id)
+
+        if ht_enabled:
+            # Dual-column layout: Core columns adjacent in the centre.
+            # Left:  Usage(%) | Process | Parent | Core
+            # Right: Core | Parent | Process | Usage(%)
+            LEFT_ORDER  = ["Usage", "Process", "Parent", "Core"]
+            RIGHT_ORDER = ["Core",  "Parent",  "Process", "Usage"]
+            left_cols  = [c for c in LEFT_ORDER  if c.lower() not in ignored]
+            right_cols = [c for c in RIGHT_ORDER if c.lower() not in ignored]
+            all_col_names = left_cols + right_cols
+            n_left = len(left_cols)
+            n_total = len(all_col_names)
+
+            _set_header_row(ws, 1, [COL_META[c][0] for c in all_col_names])
+
+            left_count = (len(sorted_cores) + 1) // 2
+            left_half  = sorted_cores[:left_count]
+            right_half = sorted_cores[left_count:]
+
+            row_idx = 2
+            for i, cs_l in enumerate(left_half):
+                cs_r = right_half[i] if i < len(right_half) else None
+
+                # ── Main pair row ─────────────────────────────────────────────
+                col = 1
+                for name in left_cols:
+                    _, fn, kind = COL_META[name]
+                    cell = ws.cell(row=row_idx, column=col, value=fn(cs_l))
+                    _apply_cell_style(cell, kind, cs_l, row_idx)
+                    col += 1
+                for name in right_cols:
+                    _, fn, kind = COL_META[name]
+                    if cs_r is not None:
+                        cell = ws.cell(row=row_idx, column=col, value=fn(cs_r))
+                        _apply_cell_style(cell, kind, cs_r, row_idx)
+                    else:
+                        ws.cell(row=row_idx, column=col, value="").border = _border()
+                    col += 1
+                row_idx += 1
+
+                # ── Stacked sub-rows: left & right threads interleaved ────────
+                if stack_procs:
+                    left_procs  = cs_l.all_procs
+                    right_procs = cs_r.all_procs if cs_r else []
+                    for j in range(max(len(left_procs), len(right_procs))):
+                        # Blank row with borders, overwritten below
+                        for c_idx in range(1, n_total + 1):
+                            ws.cell(row=row_idx, column=c_idx, value="").border = _border()
+
+                        if j < len(left_procs):
+                            t, p, pct = left_procs[j]
+                            col = 1
+                            for name in left_cols:
+                                _, _, kind = COL_META[name]
+                                _write_stacked_cell(row_idx, col, kind,
+                                                    _stacked_val(kind, t, p, pct))
+                                col += 1
+
+                        if j < len(right_procs):
+                            t, p, pct = right_procs[j]
+                            col = n_left + 1
+                            for name in right_cols:
+                                _, _, kind = COL_META[name]
+                                _write_stacked_cell(row_idx, col, kind,
+                                                    _stacked_val(kind, t, p, pct))
+                                col += 1
+
+                        row_idx += 1
+
+            if show_databar and row_idx > 2:
+                _add_databars(all_col_names, row_idx - 1)
+
+        else:
+            # Single-column layout for non-HT systems.
+            SINGLE_ORDER = ["Core", "Usage", "Process", "Parent"]
+            col_names = [c for c in SINGLE_ORDER if c.lower() not in ignored]
+            col_map   = {COL_META[c][2]: idx for idx, c in enumerate(col_names, start=1)}
+            type_col  = len(col_names) + 1
+
+            headers = [COL_META[c][0] for c in col_names]
+            if stack_procs:
+                headers = headers + ["Type"]
+            _set_header_row(ws, 1, headers)
+
+            row_idx = 2
+            for cs in sorted_cores:
+                for col_idx, name in enumerate(col_names, start=1):
+                    _, fn, kind = COL_META[name]
+                    cell = ws.cell(row=row_idx, column=col_idx, value=fn(cs))
+                    cell.border = _border()
+                    if kind == "core":
+                        cell.alignment = _center()
+                        if cs.label in STATUS_STYLE:
+                            cell.fill, cell.font = STATUS_STYLE[cs.label]
+                    else:
+                        if kind == "usage":
+                            cell.alignment = _center()
+                        if row_idx % 2 == 0:
+                            cell.fill = FILL_ALT_ROW
+
+                if stack_procs:
+                    type_cell = ws.cell(row=row_idx, column=type_col, value="top")
+                    type_cell.font = _font("1E3A5F", bold=True)
+                    type_cell.border = _border()
+                    type_cell.alignment = _center()
+                row_idx += 1
+
+                if stack_procs:
+                    for thread_name, parent_name, cpu_pct in cs.all_procs:
+                        if "core" in col_map:
+                            c = ws.cell(row=row_idx, column=col_map["core"], value="")
+                            c.border = _border()
+                            c.alignment = _center()
+                        if "usage" in col_map:
+                            c = ws.cell(row=row_idx, column=col_map["usage"],
+                                        value=round(cpu_pct, 1))
+                            c.font = FONT_STACKED
+                            c.fill = FILL_STACKED
+                            c.border = _border()
+                            c.alignment = _center()
+                        if "process" in col_map:
+                            c = ws.cell(row=row_idx, column=col_map["process"],
+                                        value=thread_name or "—")
+                            c.font = FONT_STACKED
+                            c.fill = FILL_STACKED
+                            c.border = _border()
+                        if "parent" in col_map:
+                            c = ws.cell(row=row_idx, column=col_map["parent"],
+                                        value=parent_name or "—")
+                            c.font = FONT_STACKED
+                            c.fill = FILL_STACKED
+                            c.border = _border()
+                        tc = ws.cell(row=row_idx, column=type_col, value="stacked")
+                        tc.font = FONT_STACKED
+                        tc.fill = FILL_STACKED
+                        tc.border = _border()
+                        tc.alignment = _center()
+                        row_idx += 1
+
+            if show_databar and row_idx > 2:
+                _add_databars(col_names, row_idx - 1)
+
         _auto_width(ws)
 
     # ── Write snapshot sheets (or single topology sheet) ─────────────────────
