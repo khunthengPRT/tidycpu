@@ -48,6 +48,9 @@ sudo tidycpu [OPTIONS]
 | `--check-pid PID` | | Inspect a specific PID: affinity, cores, threads |
 | `--export-html FILE` | | Export report to an HTML file |
 | `--export-text FILE` | | Export report to a plain-text file |
+| `--export-excel FILE` | | Export report to an Excel file (requires `openpyxl`) |
+| `--ignore-col COLS` | | Hide columns from the topology table (comma-separated, e.g. `Bar,Usage`) |
+| `--specify PARENTS` | | Highlight rows whose parent process matches any of these names (comma-separated) |
 
 ---
 
@@ -88,8 +91,23 @@ sudo tidycpu --live --duration 5 --export-html /tmp/report.html
 # Export to plain text
 sudo tidycpu --live --duration 5 --export-text /tmp/report.txt
 
+# Export to Excel (requires openpyxl — see Dependencies)
+sudo tidycpu --live --duration 5 --export-excel /tmp/report.xlsx
+
 # Combine: monitor nginx + php-fpm live, export to HTML
 sudo tidycpu --pid "nginx|php-fpm" --duration 10 --export-html /tmp/report.html
+
+# Hide the Bar column from the live table
+sudo tidycpu --live --ignore-col Bar
+
+# Hide multiple columns
+sudo tidycpu --live --ignore-col Bar,Usage
+
+# Show all cores but highlight rows belonging to nginx or php-fpm
+sudo tidycpu --live --specify nginx,php-fpm
+
+# Combine: focus on specific parents and hide bar column
+sudo tidycpu --live --specify nginx --ignore-col Bar
 ```
 
 ---
@@ -98,19 +116,23 @@ sudo tidycpu --pid "nginx|php-fpm" --duration 10 --export-html /tmp/report.html
 
 ### CPU Topology Table
 
-Printed every iteration. Each row is one logical core:
+Printed every iteration. On hyper-threaded systems two cores are shown side-by-side, with the bar on the outer edges and the core IDs in the centre:
 
 ```
-  Core   Usage  Bar                     Status  Process
-  ────   ─────  ──────────────────────  ──────  ────────────────
-  CPU0   72.3%  ████████████████░░░░░░  WARM    php-fpm
-  CPU1    4.1%  █░░░░░░░░░░░░░░░░░░░░░  COLD    —
-  CPU2   95.0%  ██████████████████████  HOT     nginx
-  CPU3   12.0%  ██░░░░░░░░░░░░░░░░░░░░  COLD    kworker
+  ┌────────────────────────┬────────┬─────────────────┬─────────────────┬───────┬───────┬─────────────────┬─────────────────┬────────┬────────────────────────┐
+  │          Bar           │ Usage  │    Process      │     Parent      │ Core  │ Core  │     Parent      │    Process      │ Usage  │          Bar           │
+  ├────────────────────────┼────────┼─────────────────┼─────────────────┼───────┼───────┼─────────────────┼─────────────────┼────────┼────────────────────────┤
+  │ ████████████████░░░░░░ │ 72.3%  │ worker          │ nginx           │ CPU0  │ CPU4  │ php-fpm         │ php-fpm         │  4.1%  │ █░░░░░░░░░░░░░░░░░░░░░ │
+  └────────────────────────┴────────┴─────────────────┴─────────────────┴───────┴───────┴─────────────────┴─────────────────┴────────┴────────────────────────┘
 ```
 
-- **Status** — `HOT` (≥ 80%), `WARM` (≥ 40%), `COLD` (< 40%)
-- **Process** — name of the thread with the most cumulative CPU time on that core, read from `/proc/<pid>/task/<tid>/stat`
+- **Bar** — visual usage bar; colour reflects load: green (cold), yellow (warm), red (hot)
+- **Usage** — per-core CPU percentage over the last 0.5 s sample window
+- **Process** — name of the thread with the most cumulative CPU time on that core
+- **Parent** — name of the process that owns that thread (from `/proc/<pid>/comm`)
+- **Core** — logical CPU ID
+
+Columns can be hidden with `--ignore-col` and specific parent processes highlighted with `--specify`.
 
 ### Process / Thread Detail (`--pid`)
 
@@ -167,4 +189,14 @@ Each tab shows the full CPU topology table including the **Process** column.
 - Linux only (`/proc/stat`, `/proc/*/task/*/stat`, `/sys/devices/system/cpu`)
 - `taskset` from `util-linux` (for affinity reads and writes)
 - `ps` from `procps`
-- Root (`sudo`) for reading other processes' affinity and applying changesv
+- Root (`sudo`) for reading other processes' affinity and applying changes
+
+## Dependencies
+
+The core tool has **no pip dependencies**. Excel export requires one extra package:
+
+```bash
+pip install openpyxl
+```
+
+Without it, `--export-excel` will raise an error at runtime. HTML and text export work without any additional packages.
