@@ -959,21 +959,24 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
     if snapshots and sysinfo:
         if export_html:
             try:
-                filename = export_to_html(sysinfo, topology, core_stats, [], export_html, snapshots=snapshots)
+                filename = export_to_html(sysinfo, topology, core_stats, [], export_html,
+                                          snapshots=snapshots, ignore_cols=ignore_cols)
                 print(f"  {C.GREEN}✔{C.RESET}  HTML report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
             except Exception as e:
                 print(f"  {C.RED}✘{C.RESET}  HTML export failed: {e}\n")
-        
+
         if export_text:
             try:
-                filename = export_to_text(sysinfo, topology, core_stats, [], export_text, snapshots=snapshots)
+                filename = export_to_text(sysinfo, topology, core_stats, [], export_text,
+                                          snapshots=snapshots, ignore_cols=ignore_cols)
                 print(f"  {C.GREEN}✔{C.RESET}  Text report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
             except Exception as e:
                 print(f"  {C.RED}✘{C.RESET}  Text export failed: {e}\n")
 
         if export_excel:
             try:
-                filename = export_to_excel(sysinfo, topology, core_stats, [], export_excel, snapshots=snapshots)
+                filename = export_to_excel(sysinfo, topology, core_stats, [], export_excel,
+                                           snapshots=snapshots, ignore_cols=ignore_cols)
                 print(f"  {C.GREEN}✔{C.RESET}  Excel report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
             except Exception as e:
                 print(f"  {C.RED}✘{C.RESET}  Excel export failed: {e}\n")
@@ -1053,7 +1056,8 @@ def export_to_html(
     core_stats: list[CoreStat],
     processes: list[ProcessInfo],
     filename: str = "tidycpu_report.html",
-    snapshots: Optional[list[Snapshot]] = None
+    snapshots: Optional[list[Snapshot]] = None,
+    ignore_cols: Optional[list[str]] = None,
 ):
     """Export current state to HTML file with styling."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1157,6 +1161,10 @@ def export_to_html(
 """
     
     def render_topology_section(core_stats_data, title_suffix=""):
+        ignored = {c.lower() for c in (ignore_cols or [])}
+        vis_left  = [c for c in _LEFT_ORDER  if c.lower() not in ignored]
+        vis_right = [c for c in _RIGHT_ORDER if c.lower() not in ignored]
+
         stats_map = {cs.core_id: cs for cs in core_stats_data}
         total_cores = len(stats_map)
         left_count = (total_cores + 1) // 2
@@ -1185,58 +1193,47 @@ def export_to_html(
                 <div class="summary-item">HT: {'Enabled' if ht_enabled else 'Disabled'}</div>
             </div>
 """
-        # Bar cell shared by both row helpers
-        def _bar_cell(cs):
+        def _cell(col, cs):
             lc = cs.label.lower()
-            return f"<td><div class=\"bar\"><div class=\"bar-fill {lc}\" style=\"width:{cs.usage:.1f}%\"></div></div></td>"
+            if col == "Bar":
+                return (f"<td><div class=\"bar\"><div class=\"bar-fill {lc}\""
+                        f" style=\"width:{cs.usage:.1f}%\"></div></div></td>")
+            if col == "Usage":
+                return f"<td>{cs.usage:.1f}%</td>"
+            if col == "Process":
+                return f"<td><span class=\"process-name\">{cs.top_proc or '&#8212;'}</span></td>"
+            if col == "Parent":
+                return f"<td><span class=\"parent-name\">{cs.top_parent or '&#8212;'}</span></td>"
+            if col == "Core":
+                return f"<td><code>CPU{cs.core_id}</code></td>"
+            return "<td></td>"
 
-        def _row_left(cs):
-            proc   = cs.top_proc   or "&#8212;"
-            parent = cs.top_parent or "&#8212;"
-            return (
-                f"<tr>"
-                f"{_bar_cell(cs)}"
-                f"<td>{cs.usage:.1f}%</td>"
-                f"<td><span class=\"process-name\">{proc}</span></td>"
-                f"<td><span class=\"parent-name\">{parent}</span></td>"
-                f"<td><code>CPU{cs.core_id}</code></td>"
-                f"</tr>\n"
-            )
+        def _row(cs, cols):
+            return "<tr>" + "".join(_cell(c, cs) for c in cols) + "</tr>\n"
 
-        def _row_right(cs):
-            proc   = cs.top_proc   or "&#8212;"
-            parent = cs.top_parent or "&#8212;"
-            return (
-                f"<tr>"
-                f"<td><code>CPU{cs.core_id}</code></td>"
-                f"<td><span class=\"parent-name\">{parent}</span></td>"
-                f"<td><span class=\"process-name\">{proc}</span></td>"
-                f"<td>{cs.usage:.1f}%</td>"
-                f"{_bar_cell(cs)}"
-                f"</tr>\n"
-            )
-
-        HDR_LEFT  = "<thead><tr><th>Bar</th><th>Usage</th><th>Process</th><th>Parent</th><th>Core</th></tr></thead>"
-        HDR_RIGHT = "<thead><tr><th>Core</th><th>Parent</th><th>Process</th><th>Usage</th><th>Bar</th></tr></thead>"
+        def _hdr(cols):
+            return ("<thead><tr>"
+                    + "".join(f"<th>{c}</th>" for c in cols)
+                    + "</tr></thead>")
 
         if ht_enabled:
             s += '            <div class="two-column">\n'
-            s += f"                <table>{HDR_LEFT}<tbody>\n"
+            s += f"                <table>{_hdr(vis_left)}<tbody>\n"
             for i in range(left_count):
                 if i in stats_map:
-                    s += "                    " + _row_left(stats_map[i])
+                    s += "                    " + _row(stats_map[i], vis_left)
             s += "                </tbody></table>\n"
-            s += f"                <table>{HDR_RIGHT}<tbody>\n"
+            s += f"                <table>{_hdr(vis_right)}<tbody>\n"
             for i in range(left_count, total_cores):
                 if i in stats_map:
-                    s += "                    " + _row_right(stats_map[i])
+                    s += "                    " + _row(stats_map[i], vis_right)
             s += "                </tbody></table>\n"
             s += "            </div>\n"
         else:
-            s += f"            <table>{HDR_LEFT}<tbody>\n"
+            s += f"            <table>{_hdr(vis_left)}<tbody>\n"
             for i in range(total_cores):
                 if i in stats_map:
-                    s += "                " + _row_left(stats_map[i])
+                    s += "                " + _row(stats_map[i], vis_left)
             s += "            </tbody></table>\n"
 
         return s
@@ -1294,7 +1291,8 @@ def export_to_text(
     core_stats: list[CoreStat],
     processes: list[ProcessInfo],
     filename: str = "tidycpu_report.txt",
-    snapshots: Optional[list[Snapshot]] = None
+    snapshots: Optional[list[Snapshot]] = None,
+    ignore_cols: Optional[list[str]] = None,
 ):
     """Export current state to text file."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1320,6 +1318,10 @@ def export_to_text(
     output.append("")
     
     def render_topology(core_stats_data, title_suffix=""):
+        ignored = {c.lower() for c in (ignore_cols or [])}
+        vis_left  = [c for c in _LEFT_ORDER  if c.lower() not in ignored]
+        vis_right = [c for c in _RIGHT_ORDER if c.lower() not in ignored]
+
         stats_map = {cs.core_id: cs for cs in core_stats_data}
         total_cores = len(stats_map)
         left_count = (total_cores + 1) // 2
@@ -1336,49 +1338,57 @@ def export_to_text(
         total_physical_cores = sum(len(set(t.core_id for t in v)) for v in by_physical.values())
         ht_enabled = total_cores > total_physical_cores
 
-        WB, WU, WP, WA, WC = 22, 6, 15, 15, 5  # Bar, Usage, Process, pArent, Core
+        W = _COL_WIDTHS  # shared with terminal renderer
 
         def _bar(pct):
-            f = int(pct / 100 * WB)
-            return '█' * f + '░' * (WB - f)
+            f = int(pct / 100 * W["Bar"])
+            return '█' * f + '░' * (W["Bar"] - f)
 
-        def _fmt_left(cs):
+        def _cell(col, cs, is_right=False):
             if cs is None:
-                return " " * (WB + WU + WP + WA + WC + 8)
-            proc   = (cs.top_proc   or "—")[:WP]
-            parent = (cs.top_parent or "—")[:WA]
-            return (f"{_bar(cs.usage):<{WB}}  {cs.usage:>{WU}.1f}%  "
-                    f"{proc:<{WP}}  {parent:<{WA}}  CPU{cs.core_id:<{WC-3}}")
+                return " " * W[col]
+            w = W[col]
+            if col == "Bar":
+                return _bar(cs.usage)
+            if col == "Usage":
+                return f"{cs.usage:>{w-1}.1f}%"
+            if col == "Process":
+                t = (cs.top_proc or "—")[:w]
+                return f"{t:>{w}}" if is_right else f"{t:<{w}}"
+            if col == "Parent":
+                t = (cs.top_parent or "—")[:w]
+                return f"{t:>{w}}" if is_right else f"{t:<{w}}"
+            if col == "Core":
+                t = f"CPU{cs.core_id}"
+                return f"{t:>{w}}" if is_right else f"{t:<{w}}"
+            return " " * w
 
-        def _fmt_right(cs):
-            if cs is None:
-                return ""
-            proc   = (cs.top_proc   or "—")[:WP]
-            parent = (cs.top_parent or "—")[:WA]
-            return (f"CPU{cs.core_id:<{WC-3}}  {parent:<{WA}}  {proc:<{WP}}  "
-                    f"{cs.usage:>{WU}.1f}%  {_bar(cs.usage):<{WB}}")
+        def _row(cs, cols, is_right=False):
+            return "  ".join(_cell(c, cs, is_right) for c in cols)
 
-        lines = []
-        lines.append(f"CPU TOPOLOGY{title_suffix}")
+        def _hdr(cols, is_right=False):
+            return "  ".join(
+                f"{c:>{W[c]}}" if (is_right and c not in ("Bar", "Usage")) else f"{c:<{W[c]}}"
+                for c in cols
+            )
+
+        def _sep(cols):
+            return "  ".join("─" * W[c] for c in cols)
+
+        lines = [f"CPU TOPOLOGY{title_suffix}"]
 
         if ht_enabled:
-            hdr_l = f"{'Bar':<{WB}}  {'Usage':>{WU}}  {'Process':<{WP}}  {'Parent':<{WA}}  {'Core':<{WC}}"
-            hdr_r = f"{'Core':<{WC}}  {'Parent':<{WA}}  {'Process':<{WP}}  {'Usage':>{WU}}  {'Bar':<{WB}}"
-            sep_l = f"{'─'*WB}  {'─'*WU}  {'─'*WP}  {'─'*WA}  {'─'*WC}"
-            sep_r = f"{'─'*WC}  {'─'*WA}  {'─'*WP}  {'─'*WU}  {'─'*WB}"
-            lines.append(hdr_l + "  " + hdr_r)
-            lines.append(sep_l + "  " + sep_r)
+            lines.append(_hdr(vis_left) + "  " + _hdr(vis_right, is_right=True))
+            lines.append(_sep(vis_left)  + "  " + _sep(vis_right))
             for i in range(left_count):
-                left  = _fmt_left(stats_map.get(i))
-                right = _fmt_right(stats_map.get(i + left_count))
-                lines.append(left + ("  " + right if right else ""))
+                left  = _row(stats_map.get(i), vis_left)
+                right = _row(stats_map.get(i + left_count), vis_right, is_right=True)
+                lines.append(left + ("  " + right if stats_map.get(i + left_count) else ""))
         else:
-            hdr = f"{'Bar':<{WB}}  {'Usage':>{WU}}  {'Process':<{WP}}  {'Parent':<{WA}}  {'Core':<{WC}}"
-            sep = f"{'─'*WB}  {'─'*WU}  {'─'*WP}  {'─'*WA}  {'─'*WC}"
-            lines.append(hdr)
-            lines.append(sep)
+            lines.append(_hdr(vis_left))
+            lines.append(_sep(vis_left))
             for i in range(total_cores):
-                lines.append(_fmt_left(stats_map.get(i)))
+                lines.append(_row(stats_map.get(i), vis_left))
 
         lines.append("")
         lines.append(f"Summary: ● {hot_count} Hot  ● {warm_count} Warm  ● {cold_count} Cold  |  "
@@ -1416,7 +1426,8 @@ def export_to_excel(
     core_stats: list[CoreStat],
     processes: list[ProcessInfo],
     filename: str = "tidycpu_report.xlsx",
-    snapshots: Optional[list[Snapshot]] = None
+    snapshots: Optional[list[Snapshot]] = None,
+    ignore_cols: Optional[list[str]] = None,
 ):
     """Export report to an Excel (.xlsx) file using openpyxl."""
     try:
@@ -1538,47 +1549,49 @@ def export_to_excel(
 
     # ── Helper: write one topology sheet ─────────────────────────────────────
     def _write_topology_sheet(ws, core_stats_data: list[CoreStat]):
-        # Columns: Core (colored by load) | Usage (%) | Process | Parent
-        headers = ["Core", "Usage (%)", "Process", "Parent"]
-        _set_header_row(ws, 1, headers)
+        ignored = {c.lower() for c in (ignore_cols or [])}
+
+        # Build ordered list of (excel_header, value_fn, col_type)
+        # "Bar" controls the DataBar on the Usage column — not a separate column.
+        all_col_defs = [
+            ("Core",      lambda cs: f"CPU{cs.core_id}",          "core"),
+            ("Usage (%)", lambda cs: round(cs.usage, 1),           "usage"),
+            ("Process",   lambda cs: cs.top_proc    or "—",        "process"),
+            ("Parent",    lambda cs: cs.top_parent  or "—",        "parent"),
+        ]
+        col_defs = [(hdr, fn, kind) for hdr, fn, kind in all_col_defs
+                    if kind not in ignored]
+        show_databar = "bar" not in ignored and any(k == "usage" for _, _, k in col_defs)
+
+        _set_header_row(ws, 1, [h for h, _, _ in col_defs])
 
         for row_idx, cs in enumerate(
                 sorted(core_stats_data, key=lambda x: x.core_id), start=2):
-            # Core cell — background reflects HOT/WARM/COLD
-            core_cell = ws.cell(row=row_idx, column=1, value=f"CPU{cs.core_id}")
-            core_cell.border    = _border()
-            core_cell.alignment = _center()
-            if cs.label in STATUS_STYLE:
-                core_cell.fill, core_cell.font = STATUS_STYLE[cs.label]
+            for col_idx, (_, fn, kind) in enumerate(col_defs, start=1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=fn(cs))
+                cell.border = _border()
+                if kind == "core":
+                    cell.alignment = _center()
+                    if cs.label in STATUS_STYLE:
+                        cell.fill, cell.font = STATUS_STYLE[cs.label]
+                elif kind == "usage":
+                    cell.alignment = _center()
+                # Alt-row shading on non-Core columns (Core keeps its status colour)
+                if row_idx % 2 == 0 and kind != "core":
+                    cell.fill = FILL_ALT_ROW
 
-            # Usage cell
-            usage_cell = ws.cell(row=row_idx, column=2, value=round(cs.usage, 1))
-            usage_cell.border    = _border()
-            usage_cell.alignment = _center()
-
-            # Process (thread name)
-            proc_cell = ws.cell(row=row_idx, column=3,
-                                value=cs.top_proc if cs.top_proc else "—")
-            proc_cell.border = _border()
-
-            # Parent process name
-            parent_cell = ws.cell(row=row_idx, column=4,
-                                  value=cs.top_parent if cs.top_parent else "—")
-            parent_cell.border = _border()
-
-            if row_idx % 2 == 0:
-                for c in [2, 3, 4]:
-                    ws.cell(row=row_idx, column=c).fill = FILL_ALT_ROW
-
-        # Native Excel data-bar on the Usage column
-        last_row = len(core_stats_data) + 1
-        if last_row >= 2:
-            ws.conditional_formatting.add(
-                f"B2:B{last_row}",
-                DataBarRule(start_type="num", start_value=0,
-                            end_type="num", end_value=100,
-                            color="4472C4"),
-            )
+        # Native DataBar on the Usage column (only when Bar is not hidden)
+        if show_databar:
+            usage_col_idx = next(i for i, (_, _, k) in enumerate(col_defs, 1) if k == "usage")
+            usage_letter  = get_column_letter(usage_col_idx)
+            last_row = len(core_stats_data) + 1
+            if last_row >= 2:
+                ws.conditional_formatting.add(
+                    f"{usage_letter}2:{usage_letter}{last_row}",
+                    DataBarRule(start_type="num", start_value=0,
+                                end_type="num", end_value=100,
+                                color="4472C4"),
+                )
         _auto_width(ws)
 
     # ── Write snapshot sheets (or single topology sheet) ─────────────────────
@@ -1795,16 +1808,18 @@ Examples:
         try:
             if not processes:
                 processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
-            filename = export_to_html(sysinfo, topology, core_stats, processes, args.export_html)
+            filename = export_to_html(sysinfo, topology, core_stats, processes, args.export_html,
+                                      ignore_cols=args.ignore_col)
             print(f"\n  {C.GREEN}✔{C.RESET}  HTML report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
             print(f"\n  {C.RED}✘{C.RESET}  HTML export failed: {e}")
-    
+
     if args.export_text:
         try:
             if not processes:
                 processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
-            filename = export_to_text(sysinfo, topology, core_stats, processes, args.export_text)
+            filename = export_to_text(sysinfo, topology, core_stats, processes, args.export_text,
+                                      ignore_cols=args.ignore_col)
             print(f"\n  {C.GREEN}✔{C.RESET}  Text report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
             print(f"\n  {C.RED}✘{C.RESET}  Text export failed: {e}")
@@ -1813,7 +1828,8 @@ Examples:
         try:
             if not processes:
                 processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
-            filename = export_to_excel(sysinfo, topology, core_stats, processes, args.export_excel)
+            filename = export_to_excel(sysinfo, topology, core_stats, processes, args.export_excel,
+                                       ignore_cols=args.ignore_col)
             print(f"\n  {C.GREEN}✔{C.RESET}  Excel report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
             print(f"\n  {C.RED}✘{C.RESET}  Excel export failed: {e}")
