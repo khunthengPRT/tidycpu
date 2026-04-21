@@ -67,7 +67,6 @@ class CoreStat:
     core_within_physical: Optional[int] = None
     top_proc: str     = ""  # name of the busiest process/thread on this core
     top_parent: str   = ""  # name of the parent process owning that thread
-    all_procs: list   = field(default_factory=list)  # [(thread_name, parent_name, cpu_pct), ...]
 
 @dataclass
 class ThreadInfo:
@@ -436,91 +435,7 @@ def get_top_proc_per_core() -> dict[int, tuple[str, str]]:
     return {core: (name, parent) for core, (_, name, parent) in best.items()}
 
 
-def get_all_procs_per_core(
-    min_usage: float = 0.0,
-    ignore_procs: Optional[list[str]] = None,
-) -> dict[int, list[tuple]]:
-    """
-    Scan all threads and group by the last CPU core they ran on.
-    Returns dict: core_id -> [(thread_name, parent_name, cpu_pct), ...] sorted desc by cpu_pct.
-    min_usage: skip threads with cpu_pct below this threshold.
-    ignore_procs: list of name prefixes to exclude (case-insensitive prefix match).
-    """
-    ignore_prefixes = tuple(p.lower() for p in (ignore_procs or []))
-
-    # Collect per-thread CPU% from ps (thread-level via -L)
-    rc, out, _ = run(["ps", "-eLo", "tid,pcpu,comm", "--no-headers"])
-    ps_map: dict[int, float] = {}  # tid -> cpu_pct
-    if rc == 0:
-        for line in out.splitlines():
-            parts = line.split(None, 2)
-            if len(parts) >= 2:
-                try:
-                    ps_map[int(parts[0])] = float(parts[1])
-                except ValueError:
-                    pass
-
-    result: dict[int, list] = {}
-
-    try:
-        pids = [p for p in os.listdir("/proc") if p.isdigit()]
-    except PermissionError:
-        return {}
-
-    for pid_str in pids:
-        pid = int(pid_str)
-        task_dir = f"/proc/{pid}/task"
-
-        try:
-            with open(f"/proc/{pid}/comm") as f:
-                parent_name = f.read().strip()[:15]
-        except (FileNotFoundError, PermissionError):
-            parent_name = ""
-
-        if ignore_prefixes and parent_name.lower().startswith(ignore_prefixes):
-            continue
-
-        try:
-            tids = [t for t in os.listdir(task_dir) if t.isdigit()]
-        except (FileNotFoundError, PermissionError):
-            continue
-
-        for tid_str in tids:
-            tid = int(tid_str)
-            try:
-                with open(f"{task_dir}/{tid_str}/stat") as f:
-                    raw = f.read()
-                rp = raw.rfind(")")
-                if rp == -1:
-                    continue
-                fields = raw[rp + 2:].split()
-                if len(fields) < 37:
-                    continue
-                last_cpu = int(fields[36])
-
-                with open(f"{task_dir}/{tid_str}/comm") as f:
-                    thread_name = f.read().strip()[:15]
-
-                if ignore_prefixes and thread_name.lower().startswith(ignore_prefixes):
-                    continue
-
-                cpu_pct = ps_map.get(tid, 0.0)
-                if cpu_pct < min_usage:
-                    continue
-
-                result.setdefault(last_cpu, []).append((thread_name, parent_name, cpu_pct))
-            except (FileNotFoundError, PermissionError, ValueError, IndexError):
-                continue
-
-    for core_id in result:
-        result[core_id].sort(key=lambda x: x[2], reverse=True)
-
-    return result
-
-
-def get_core_usage(sample_ms: int = 500, topology: Optional[dict] = None,
-                   stack_procs: bool = False, min_usage: float = 0.0,
-                   ignore_procs: Optional[list[str]] = None) -> list[CoreStat]:
+def get_core_usage(sample_ms: int = 500, topology: Optional[dict] = None) -> list[CoreStat]:
     """Two-snapshot delta to calculate real per-core CPU %."""
     snap1 = read_proc_stat()
     time.sleep(sample_ms / 1000)
@@ -562,12 +477,6 @@ def get_core_usage(sample_ms: int = 500, topology: Optional[dict] = None,
     top_procs = get_top_proc_per_core()
     for cs in stats:
         cs.top_proc, cs.top_parent = top_procs.get(cs.core_id, ("", ""))
-
-    # Optionally populate all_procs for stacked display
-    if stack_procs:
-        all_procs_map = get_all_procs_per_core(min_usage=min_usage, ignore_procs=ignore_procs)
-        for cs in stats:
-            cs.all_procs = all_procs_map.get(cs.core_id, [])
 
     return stats
 
@@ -868,32 +777,9 @@ def _tbl_row(cells: list[str]) -> str:
     bd = _BD + "│" + C.RESET
     return bd + bd.join(cells) + bd
 
-def _render_stacked_cell(col: str, proc_entry: Optional[tuple],
-                         is_right: bool = False) -> str:
-    """Render a cell for a stacked process sub-row (below the main core row)."""
-    w = _COL_WIDTHS[col]
-    pad = w + 2
-    if proc_entry is None:
-        return " " * pad
-    thread_name, parent_name, cpu_pct = proc_entry
-    if col == "Process":
-        txt = thread_name[:w]
-        fmt = f">{w}" if is_right else f"<{w}"
-        return f" {C.DIM}{C.BLUE}{txt:{fmt}}{C.RESET} "
-    if col == "Parent":
-        txt = parent_name[:w]
-        fmt = f">{w}" if is_right else f"<{w}"
-        return f" {C.DIM}{C.MAGENTA}{txt:{fmt}}{C.RESET} "
-    if col == "Usage":
-        clr = C.RED if cpu_pct >= 80 else (C.YELLOW if cpu_pct >= 40 else C.GREEN)
-        return f" {C.DIM}{clr}{cpu_pct:>5.1f}%{C.RESET} "
-    # Bar and Core: empty for stacked rows
-    return " " * pad
-
 def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat],
                    ignore_cols: Optional[list[str]] = None,
-                   specify_parents: Optional[list[str]] = None,
-                   stack_procs: bool = False):
+                   specify_parents: Optional[list[str]] = None):
     """Print CPU topology table — two-column for HT servers, single-column otherwise."""
     ignored = {c.lower() for c in (ignore_cols or [])}
     vis_left  = [c for c in _LEFT_ORDER  if c.lower() not in ignored]
@@ -934,18 +820,6 @@ def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat],
             )
             print("  " + _tbl_row(cells))
 
-            if stack_procs:
-                procs_l = cs_l.all_procs if cs_l else []
-                procs_r = cs_r.all_procs if cs_r else []
-                for j in range(max(len(procs_l), len(procs_r))):
-                    entry_l = procs_l[j] if j < len(procs_l) else None
-                    entry_r = procs_r[j] if j < len(procs_r) else None
-                    stacked = (
-                        [_render_stacked_cell(c, entry_l, is_right=False) for c in vis_left] +
-                        [_render_stacked_cell(c, entry_r, is_right=True)  for c in vis_right]
-                    )
-                    print("  " + _tbl_row(stacked))
-
         print("  " + _tbl_line(all_cols, "└", "┴", "┘"))
     else:
         print("  " + _tbl_line(vis_left, "┌", "┬", "┐"))
@@ -957,11 +831,6 @@ def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat],
             hl = bool(spec_set and cs and cs.top_parent in spec_set)
             cells = [_render_cell(c, cs, is_right=False, hl=hl) for c in vis_left]
             print("  " + _tbl_row(cells))
-
-            if stack_procs and cs:
-                for entry in cs.all_procs:
-                    stacked = [_render_stacked_cell(c, entry, is_right=False) for c in vis_left]
-                    print("  " + _tbl_row(stacked))
 
         print("  " + _tbl_line(vis_left, "└", "┴", "┘"))
 
@@ -1017,7 +886,7 @@ def _fetch_process_info(pid: int, num_cores: int) -> Optional[ProcessInfo]:
         threads=threads
     )
 
-def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Optional[list[int]] = None, show_cpu_freq: bool = False, export_html: Optional[str] = None, export_text: Optional[str] = None, export_excel: Optional[str] = None, sysinfo: Optional[SystemInfo] = None, topology_data: Optional[dict] = None, ignore_cols: Optional[list[str]] = None, specify_parents: Optional[list[str]] = None, stack_procs: bool = False, min_usage: float = 0.0, ignore_procs: Optional[list[str]] = None):
+def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Optional[list[int]] = None, show_cpu_freq: bool = False, export_html: Optional[str] = None, export_text: Optional[str] = None, export_excel: Optional[str] = None, sysinfo: Optional[SystemInfo] = None, topology_data: Optional[dict] = None, ignore_cols: Optional[list[str]] = None, specify_parents: Optional[list[str]] = None):
     """
     Live monitoring mode - refresh stats every interval_ms for duration_sec iterations.
     CPU is sampled for SAMPLE_MS (fast), then the screen is shown for the remaining
@@ -1036,9 +905,7 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
 
     for i in range(iterations):
         # ── 1. Sample CPU (happens invisibly, screen still showing previous frame) ──
-        core_stats = get_core_usage(sample_ms=SAMPLE_MS, topology=topology,
-                                    stack_procs=stack_procs, min_usage=min_usage,
-                                    ignore_procs=ignore_procs)
+        core_stats = get_core_usage(sample_ms=SAMPLE_MS, topology=topology)
 
         # ── 2. Collect process info ───────────────────────────────────────────────
         processes: list[ProcessInfo] = []
@@ -1061,8 +928,7 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
 
         print_topology(topology, core_stats,
                        ignore_cols=ignore_cols,
-                       specify_parents=specify_parents,
-                       stack_procs=stack_procs)
+                       specify_parents=specify_parents)
 
         if filter_pids:
             label = " | ".join(str(p) for p in filter_pids)
@@ -1110,8 +976,7 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
         if export_excel:
             try:
                 filename = export_to_excel(sysinfo, topology, core_stats, [], export_excel,
-                                           snapshots=snapshots, ignore_cols=ignore_cols,
-                                           stack_procs=stack_procs)
+                                           snapshots=snapshots, ignore_cols=ignore_cols)
                 print(f"  {C.GREEN}✔{C.RESET}  Excel report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
             except Exception as e:
                 print(f"  {C.RED}✘{C.RESET}  Excel export failed: {e}\n")
@@ -1563,7 +1428,6 @@ def export_to_excel(
     filename: str = "tidycpu_report.xlsx",
     snapshots: Optional[list[Snapshot]] = None,
     ignore_cols: Optional[list[str]] = None,
-    stack_procs: bool = False,
 ):
     """Export report to an Excel (.xlsx) file using openpyxl."""
     try:
@@ -1594,17 +1458,15 @@ def export_to_excel(
     def _center() -> Alignment:
         return Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    FILL_HEADER   = _fill("1E3A5F")
-    FILL_ALT_ROW  = _fill("F2F2F2")
-    FILL_HOT      = _fill("F44336")
-    FILL_WARM     = _fill("FF9800")
-    FILL_COLD     = _fill("4CAF50")
-    FILL_STACKED  = _fill("FAFAFA")   # very light gray for stacked sub-rows
-    FONT_HDR      = _font("FFFFFF", bold=True)
-    FONT_TITLE    = _font("1E3A5F", bold=True, size=14)
-    FONT_WHITE    = _font("FFFFFF", bold=True)
-    FONT_DIM      = _font("666666", italic=True)
-    FONT_STACKED  = _font("999999", italic=True)   # dimmed italic for stacked rows
+    FILL_HEADER  = _fill("1E3A5F")
+    FILL_ALT_ROW = _fill("F2F2F2")
+    FILL_HOT     = _fill("F44336")
+    FILL_WARM    = _fill("FF9800")
+    FILL_COLD    = _fill("4CAF50")
+    FONT_HDR     = _font("FFFFFF", bold=True)
+    FONT_TITLE   = _font("1E3A5F", bold=True, size=14)
+    FONT_WHITE   = _font("FFFFFF", bold=True)
+    FONT_DIM     = _font("666666", italic=True)
 
     STATUS_STYLE = {
         "HOT":  (FILL_HOT,  FONT_WHITE),
@@ -1701,14 +1563,10 @@ def export_to_excel(
                     if kind not in ignored]
         show_databar = "bar" not in ignored and any(k == "usage" for _, _, k in col_defs)
 
-        headers = [h for h, _, _ in col_defs]
-        if stack_procs:
-            headers = ["Core", "Usage (%)", "Process", "Parent", "Type"]
-        _set_header_row(ws, 1, headers)
+        _set_header_row(ws, 1, [h for h, _, _ in col_defs])
 
-        row_idx = 2
-        for cs in sorted(core_stats_data, key=lambda x: x.core_id):
-            # ── Main core row ─────────────────────────────────────────────────
+        for row_idx, cs in enumerate(
+                sorted(core_stats_data, key=lambda x: x.core_id), start=2):
             for col_idx, (_, fn, kind) in enumerate(col_defs, start=1):
                 cell = ws.cell(row=row_idx, column=col_idx, value=fn(cs))
                 cell.border = _border()
@@ -1718,63 +1576,15 @@ def export_to_excel(
                         cell.fill, cell.font = STATUS_STYLE[cs.label]
                 elif kind == "usage":
                     cell.alignment = _center()
+                # Alt-row shading on non-Core columns (Core keeps its status colour)
                 if row_idx % 2 == 0 and kind != "core":
                     cell.fill = FILL_ALT_ROW
-
-            if stack_procs:
-                # Write "Top" label in the Type column (one past col_defs)
-                type_col = len(col_defs) + 1
-                type_cell = ws.cell(row=row_idx, column=type_col, value="top")
-                type_cell.font = _font("1E3A5F", bold=True)
-                type_cell.border = _border()
-                type_cell.alignment = _center()
-            row_idx += 1
-
-            # ── Stacked sub-rows (one per process in all_procs) ───────────────
-            if stack_procs:
-                col_map = {kind: idx for idx, (_, _, kind) in enumerate(col_defs, start=1)}
-                type_col = len(col_defs) + 1
-                for thread_name, parent_name, cpu_pct in cs.all_procs:
-                    # Core cell: empty (already identified by the main row above)
-                    if "core" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["core"], value="")
-                        c.border = _border()
-                        c.alignment = _center()
-                    # Usage: per-thread CPU%
-                    if "usage" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["usage"],
-                                    value=round(cpu_pct, 1))
-                        c.font = FONT_STACKED
-                        c.fill = FILL_STACKED
-                        c.border = _border()
-                        c.alignment = _center()
-                    # Process
-                    if "process" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["process"],
-                                    value=thread_name or "—")
-                        c.font = FONT_STACKED
-                        c.fill = FILL_STACKED
-                        c.border = _border()
-                    # Parent
-                    if "parent" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["parent"],
-                                    value=parent_name or "—")
-                        c.font = FONT_STACKED
-                        c.fill = FILL_STACKED
-                        c.border = _border()
-                    # Type label
-                    tc = ws.cell(row=row_idx, column=type_col, value="stacked")
-                    tc.font = FONT_STACKED
-                    tc.fill = FILL_STACKED
-                    tc.border = _border()
-                    tc.alignment = _center()
-                    row_idx += 1
 
         # Native DataBar on the Usage column (only when Bar is not hidden)
         if show_databar:
             usage_col_idx = next(i for i, (_, _, k) in enumerate(col_defs, 1) if k == "usage")
             usage_letter  = get_column_letter(usage_col_idx)
-            last_row = row_idx - 1
+            last_row = len(core_stats_data) + 1
             if last_row >= 2:
                 ws.conditional_formatting.add(
                     f"{usage_letter}2:{usage_letter}{last_row}",
@@ -1837,10 +1647,6 @@ Examples:
   sudo python3 tidycpu.py --export-excel report.xlsx # Export to Excel (requires openpyxl)
   sudo python3 tidycpu.py --live --ignore-col Bar    # Hide Bar column in live view
   sudo python3 tidycpu.py --live --specify nginx,php-fpm  # Highlight rows for these parents
-  sudo python3 tidycpu.py --stack-procs              # Stack all active processes per core row
-  sudo python3 tidycpu.py --stack-procs --all        # Include even idle processes in stack
-  sudo python3 tidycpu.py --stack-procs --min-usage 0.5  # Only stack processes using >= 0.5% CPU
-  sudo python3 tidycpu.py --stack-procs --ignore-process kworker,ksoftirqd  # Exclude kernel threads
         """
     )
     parser.add_argument("--live", "-l", action="store_true",
@@ -1867,29 +1673,9 @@ Examples:
     parser.add_argument("--specify", type=lambda s: [p.strip() for p in s.split(",")],
         default=None, metavar="PARENTS",
         help="Highlight rows whose parent process matches these names (comma-separated)")
-    parser.add_argument("--stack-procs", action="store_true",
-        help="Stack all processes running on each core below the core row")
-    parser.add_argument("--all", dest="include_all", action="store_true",
-        help="Include all processes in the stacked view (even 0%% CPU); use with --stack-procs")
-    parser.add_argument("--min-usage", type=float, default=None, metavar="PCT",
-        help="Only show processes with CPU%% >= PCT in stacked view (e.g. 0.5); default 0.1 without --all")
-    parser.add_argument("--ignore-process", type=lambda s: [p.strip() for p in s.split(",")],
-        default=None, metavar="NAMES",
-        help="Comma-separated process name prefixes to exclude from stacked view (e.g. kworker,ksoftirqd)")
 
     args = parser.parse_args()
-
-    # Resolve effective min_usage for --stack-procs:
-    #   --all forces 0.0 (show every process, even idle)
-    #   --min-usage N overrides the threshold explicitly
-    #   default without --all is 0.1 (only threads with measurable recent CPU)
-    if args.include_all:
-        effective_min_usage = 0.0
-    elif args.min_usage is not None:
-        effective_min_usage = args.min_usage
-    else:
-        effective_min_usage = 0.1
-
+    
     print(BANNER)
 
     check_root()
@@ -1997,9 +1783,6 @@ Examples:
                 topology_data=topology,
                 ignore_cols=args.ignore_col,
                 specify_parents=args.specify,
-                stack_procs=args.stack_procs,
-                min_usage=effective_min_usage,
-                ignore_procs=args.ignore_process,
             )
         except KeyboardInterrupt:
             print(f"\n\n  {C.YELLOW}Monitoring interrupted.{C.RESET}\n")
@@ -2007,16 +1790,12 @@ Examples:
 
     # ── Standard rebalance mode ──────────────────────────────────────────────
     print(f"\n  {C.CYAN}○{C.RESET}  Sampling core usage (500 ms) …", end="", flush=True)
-    core_stats = get_core_usage(sample_ms=500, topology=topology,
-                                stack_procs=args.stack_procs,
-                                min_usage=effective_min_usage,
-                                ignore_procs=args.ignore_process)
+    core_stats = get_core_usage(sample_ms=500, topology=topology)
     print(f"\r  {C.GREEN}✔{C.RESET}  Core telemetry collected.          ")
 
     print_topology(topology, core_stats,
                    ignore_cols=args.ignore_col,
-                   specify_parents=args.specify,
-                   stack_procs=args.stack_procs)
+                   specify_parents=args.specify)
 
     processes = []
 
@@ -2050,8 +1829,7 @@ Examples:
             if not processes:
                 processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
             filename = export_to_excel(sysinfo, topology, core_stats, processes, args.export_excel,
-                                       ignore_cols=args.ignore_col,
-                                       stack_procs=args.stack_procs)
+                                       ignore_cols=args.ignore_col)
             print(f"\n  {C.GREEN}✔{C.RESET}  Excel report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
             print(f"\n  {C.RED}✘{C.RESET}  Excel export failed: {e}")
