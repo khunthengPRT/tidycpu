@@ -1779,11 +1779,11 @@ def export_to_excel(
                 _add_databars(flat_cols, row_idx - 1)
 
         elif ht_enabled:
-            # Dual-column layout: Core columns as bookends, Parent columns meet in centre.
-            # Left:  Core | Usage(%) | Process | Parent
-            # Right: Parent | Process | Usage(%) | Core
-            LEFT_ORDER  = ["Core", "Usage", "Process", "Parent"]
-            RIGHT_ORDER = ["Parent", "Process", "Usage", "Core"]
+            # Dual-column layout: Core columns meet in the centre for easy collision spotting.
+            # Left:  Usage(%) | Process | Parent | Core
+            # Right: Core | Parent | Process | Usage(%)
+            LEFT_ORDER  = ["Usage", "Process", "Parent", "Core"]
+            RIGHT_ORDER = ["Core", "Parent", "Process", "Usage"]
             left_cols  = [c for c in LEFT_ORDER  if c.lower() not in ignored]
             right_cols = [c for c in RIGHT_ORDER if c.lower() not in ignored]
             all_col_names = left_cols + right_cols
