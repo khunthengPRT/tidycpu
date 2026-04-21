@@ -1110,7 +1110,8 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
         if export_excel:
             try:
                 filename = export_to_excel(sysinfo, topology, core_stats, [], export_excel,
-                                           snapshots=snapshots, ignore_cols=ignore_cols)
+                                           snapshots=snapshots, ignore_cols=ignore_cols,
+                                           stack_procs=stack_procs)
                 print(f"  {C.GREEN}✔{C.RESET}  Excel report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
             except Exception as e:
                 print(f"  {C.RED}✘{C.RESET}  Excel export failed: {e}\n")
@@ -1562,6 +1563,7 @@ def export_to_excel(
     filename: str = "tidycpu_report.xlsx",
     snapshots: Optional[list[Snapshot]] = None,
     ignore_cols: Optional[list[str]] = None,
+    stack_procs: bool = False,
 ):
     """Export report to an Excel (.xlsx) file using openpyxl."""
     try:
@@ -1592,15 +1594,17 @@ def export_to_excel(
     def _center() -> Alignment:
         return Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    FILL_HEADER  = _fill("1E3A5F")
-    FILL_ALT_ROW = _fill("F2F2F2")
-    FILL_HOT     = _fill("F44336")
-    FILL_WARM    = _fill("FF9800")
-    FILL_COLD    = _fill("4CAF50")
-    FONT_HDR     = _font("FFFFFF", bold=True)
-    FONT_TITLE   = _font("1E3A5F", bold=True, size=14)
-    FONT_WHITE   = _font("FFFFFF", bold=True)
-    FONT_DIM     = _font("666666", italic=True)
+    FILL_HEADER   = _fill("1E3A5F")
+    FILL_ALT_ROW  = _fill("F2F2F2")
+    FILL_HOT      = _fill("F44336")
+    FILL_WARM     = _fill("FF9800")
+    FILL_COLD     = _fill("4CAF50")
+    FILL_STACKED  = _fill("FAFAFA")   # very light gray for stacked sub-rows
+    FONT_HDR      = _font("FFFFFF", bold=True)
+    FONT_TITLE    = _font("1E3A5F", bold=True, size=14)
+    FONT_WHITE    = _font("FFFFFF", bold=True)
+    FONT_DIM      = _font("666666", italic=True)
+    FONT_STACKED  = _font("999999", italic=True)   # dimmed italic for stacked rows
 
     STATUS_STYLE = {
         "HOT":  (FILL_HOT,  FONT_WHITE),
@@ -1697,10 +1701,14 @@ def export_to_excel(
                     if kind not in ignored]
         show_databar = "bar" not in ignored and any(k == "usage" for _, _, k in col_defs)
 
-        _set_header_row(ws, 1, [h for h, _, _ in col_defs])
+        headers = [h for h, _, _ in col_defs]
+        if stack_procs:
+            headers = ["Core", "Usage (%)", "Process", "Parent", "Type"]
+        _set_header_row(ws, 1, headers)
 
-        for row_idx, cs in enumerate(
-                sorted(core_stats_data, key=lambda x: x.core_id), start=2):
+        row_idx = 2
+        for cs in sorted(core_stats_data, key=lambda x: x.core_id):
+            # ── Main core row ─────────────────────────────────────────────────
             for col_idx, (_, fn, kind) in enumerate(col_defs, start=1):
                 cell = ws.cell(row=row_idx, column=col_idx, value=fn(cs))
                 cell.border = _border()
@@ -1710,15 +1718,63 @@ def export_to_excel(
                         cell.fill, cell.font = STATUS_STYLE[cs.label]
                 elif kind == "usage":
                     cell.alignment = _center()
-                # Alt-row shading on non-Core columns (Core keeps its status colour)
                 if row_idx % 2 == 0 and kind != "core":
                     cell.fill = FILL_ALT_ROW
+
+            if stack_procs:
+                # Write "Top" label in the Type column (one past col_defs)
+                type_col = len(col_defs) + 1
+                type_cell = ws.cell(row=row_idx, column=type_col, value="top")
+                type_cell.font = _font("1E3A5F", bold=True)
+                type_cell.border = _border()
+                type_cell.alignment = _center()
+            row_idx += 1
+
+            # ── Stacked sub-rows (one per process in all_procs) ───────────────
+            if stack_procs:
+                col_map = {kind: idx for idx, (_, _, kind) in enumerate(col_defs, start=1)}
+                type_col = len(col_defs) + 1
+                for thread_name, parent_name, cpu_pct in cs.all_procs:
+                    # Core cell: empty (already identified by the main row above)
+                    if "core" in col_map:
+                        c = ws.cell(row=row_idx, column=col_map["core"], value="")
+                        c.border = _border()
+                        c.alignment = _center()
+                    # Usage: per-thread CPU%
+                    if "usage" in col_map:
+                        c = ws.cell(row=row_idx, column=col_map["usage"],
+                                    value=round(cpu_pct, 1))
+                        c.font = FONT_STACKED
+                        c.fill = FILL_STACKED
+                        c.border = _border()
+                        c.alignment = _center()
+                    # Process
+                    if "process" in col_map:
+                        c = ws.cell(row=row_idx, column=col_map["process"],
+                                    value=thread_name or "—")
+                        c.font = FONT_STACKED
+                        c.fill = FILL_STACKED
+                        c.border = _border()
+                    # Parent
+                    if "parent" in col_map:
+                        c = ws.cell(row=row_idx, column=col_map["parent"],
+                                    value=parent_name or "—")
+                        c.font = FONT_STACKED
+                        c.fill = FILL_STACKED
+                        c.border = _border()
+                    # Type label
+                    tc = ws.cell(row=row_idx, column=type_col, value="stacked")
+                    tc.font = FONT_STACKED
+                    tc.fill = FILL_STACKED
+                    tc.border = _border()
+                    tc.alignment = _center()
+                    row_idx += 1
 
         # Native DataBar on the Usage column (only when Bar is not hidden)
         if show_databar:
             usage_col_idx = next(i for i, (_, _, k) in enumerate(col_defs, 1) if k == "usage")
             usage_letter  = get_column_letter(usage_col_idx)
-            last_row = len(core_stats_data) + 1
+            last_row = row_idx - 1
             if last_row >= 2:
                 ws.conditional_formatting.add(
                     f"{usage_letter}2:{usage_letter}{last_row}",
@@ -1994,7 +2050,8 @@ Examples:
             if not processes:
                 processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
             filename = export_to_excel(sysinfo, topology, core_stats, processes, args.export_excel,
-                                       ignore_cols=args.ignore_col)
+                                       ignore_cols=args.ignore_col,
+                                       stack_procs=args.stack_procs)
             print(f"\n  {C.GREEN}✔{C.RESET}  Excel report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
             print(f"\n  {C.RED}✘{C.RESET}  Excel export failed: {e}")
