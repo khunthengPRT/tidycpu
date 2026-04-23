@@ -1723,65 +1723,45 @@ def export_to_excel(
 
         sorted_cores = sorted(core_stats_data, key=lambda x: x.core_id)
 
-        if stack_procs:
-            # Stacked mode: flat single-column layout with an extra Type column.
-            FLAT_ORDER = ["Core", "Usage", "Process", "Parent"]
-            flat_cols = [c for c in FLAT_ORDER if c.lower() not in ignored]
-            type_col  = len(flat_cols) + 1
-            col_map   = {COL_META[c][2]: idx for idx, c in enumerate(flat_cols, start=1)}
+        def _get_procs(cs: CoreStat) -> list:
+            """Return all_procs if populated, else a single-entry list from top_proc."""
+            return cs.all_procs if cs.all_procs else [(cs.top_proc, cs.top_parent, cs.usage)]
 
-            _set_header_row(ws, 1, [COL_META[c][0] for c in flat_cols] + ["Type"])
+        def _write_proc_cell(row: int, col: int, col_name: str,
+                             proc_entry, fill_alt: bool):
+            """Write one process-data cell (Usage/Process/Parent) with standard styling."""
+            if proc_entry is not None:
+                thread_name, parent_name, cpu_pct = proc_entry
+                if col_name == "Usage":
+                    val = round(cpu_pct, 1)
+                elif col_name == "Process":
+                    val = thread_name or "—"
+                else:
+                    val = parent_name or "—"
+            else:
+                val = ""
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.border = _border()
+            if col_name == "Usage":
+                cell.alignment = _center()
+            if fill_alt:
+                cell.fill = FILL_ALT_ROW
 
-            row_idx = 2
-            for cs in sorted_cores:
-                for col_idx, name in enumerate(flat_cols, start=1):
-                    _, fn, kind = COL_META[name]
-                    cell = ws.cell(row=row_idx, column=col_idx, value=fn(cs))
-                    _apply_cell_style(cell, kind, cs, row_idx)
-                type_cell = ws.cell(row=row_idx, column=type_col, value="top")
-                type_cell.font = _font("1E3A5F", bold=True)
-                type_cell.border = _border()
-                type_cell.alignment = _center()
-                row_idx += 1
+        def _write_core_cell(row_start: int, row_end: int, col: int, cs: CoreStat):
+            """Write (and vertically merge) a Core label cell with HOT/WARM/COLD styling."""
+            if row_end > row_start:
+                ws.merge_cells(start_row=row_start, start_column=col,
+                               end_row=row_end, end_column=col)
+            cell = ws.cell(row=row_start, column=col, value=f"CPU{cs.core_id}")
+            _apply_cell_style(cell, "core", cs, row_start)
 
-                for thread_name, parent_name, cpu_pct in cs.all_procs:
-                    if "core" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["core"], value="")
-                        c.border = _border()
-                        c.alignment = _center()
-                    if "usage" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["usage"],
-                                    value=round(cpu_pct, 1))
-                        c.font = FONT_STACKED
-                        c.fill = FILL_STACKED
-                        c.border = _border()
-                        c.alignment = _center()
-                    if "process" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["process"],
-                                    value=thread_name or "—")
-                        c.font = FONT_STACKED
-                        c.fill = FILL_STACKED
-                        c.border = _border()
-                    if "parent" in col_map:
-                        c = ws.cell(row=row_idx, column=col_map["parent"],
-                                    value=parent_name or "—")
-                        c.font = FONT_STACKED
-                        c.fill = FILL_STACKED
-                        c.border = _border()
-                    tc = ws.cell(row=row_idx, column=type_col, value="stacked")
-                    tc.font = FONT_STACKED
-                    tc.fill = FILL_STACKED
-                    tc.border = _border()
-                    tc.alignment = _center()
-                    row_idx += 1
-
-            if show_databar and row_idx > 2:
-                _add_databars(flat_cols, row_idx - 1)
-
-        elif ht_enabled:
-            # Dual-column layout: Core columns meet in the centre for easy collision spotting.
+        if ht_enabled:
+            # Dual-column HT layout with Core columns meeting in the centre.
             # Left:  Usage(%) | Process | Parent | Core
             # Right: Core | Parent | Process | Usage(%)
+            # When a core has multiple processes (all_procs populated via --stack-procs),
+            # the Core cell is merged vertically across all its process rows so both
+            # halves of each HT pair remain visually aligned.
             LEFT_ORDER  = ["Usage", "Process", "Parent", "Core"]
             RIGHT_ORDER = ["Core", "Parent", "Process", "Usage"]
             left_cols  = [c for c in LEFT_ORDER  if c.lower() not in ignored]
@@ -1790,31 +1770,99 @@ def export_to_excel(
 
             _set_header_row(ws, 1, [COL_META[c][0] for c in all_col_names])
 
+            # Locate both Core column indices (left Core last in left_cols, right Core first in right_cols)
+            left_core_col  = None
+            right_core_col = None
+            for col_idx, name in enumerate(all_col_names, 1):
+                if name == "Core":
+                    if left_core_col is None:
+                        left_core_col = col_idx
+                    else:
+                        right_core_col = col_idx
+                        break
+
             left_count = (len(sorted_cores) + 1) // 2
             left_half  = sorted_cores[:left_count]
             right_half = sorted_cores[left_count:]
 
-            for row_idx, cs_l in enumerate(left_half, start=2):
-                cs_r = right_half[row_idx - 2] if (row_idx - 2) < len(right_half) else None
-                col = 1
-                for name in left_cols:
-                    _, fn, kind = COL_META[name]
-                    cell = ws.cell(row=row_idx, column=col, value=fn(cs_l))
-                    _apply_cell_style(cell, kind, cs_l, row_idx)
-                    col += 1
-                for name in right_cols:
-                    _, fn, kind = COL_META[name]
-                    if cs_r is not None:
-                        cell = ws.cell(row=row_idx, column=col, value=fn(cs_r))
-                        _apply_cell_style(cell, kind, cs_r, row_idx)
-                    else:
-                        ws.cell(row=row_idx, column=col, value="").border = _border()
-                    col += 1
+            current_row = 2
+            for pair_idx, cs_l in enumerate(left_half):
+                cs_r = right_half[pair_idx] if pair_idx < len(right_half) else None
 
-            if show_databar and len(left_half) >= 1:
-                _add_databars(all_col_names, len(left_half) + 1)
+                procs_l = _get_procs(cs_l)
+                procs_r = _get_procs(cs_r) if cs_r else []
+                span    = max(len(procs_l), len(procs_r), 1)
+                end_row = current_row + span - 1
+                alt     = pair_idx % 2 == 1   # alternate fill per HT pair
+
+                # Write (merged) Core cells
+                if left_core_col is not None:
+                    _write_core_cell(current_row, end_row, left_core_col, cs_l)
+                if right_core_col is not None:
+                    if cs_r is not None:
+                        _write_core_cell(current_row, end_row, right_core_col, cs_r)
+                    else:
+                        for r in range(current_row, end_row + 1):
+                            cell = ws.cell(row=r, column=right_core_col, value="")
+                            cell.border = _border()
+                            cell.alignment = _center()
+
+                # Write per-process data rows for this pair
+                for sub_idx in range(span):
+                    row     = current_row + sub_idx
+                    col     = 1
+                    entry_l = procs_l[sub_idx] if sub_idx < len(procs_l) else None
+                    entry_r = procs_r[sub_idx] if sub_idx < len(procs_r) else None
+
+                    for name in left_cols:
+                        if name != "Core":
+                            _write_proc_cell(row, col, name, entry_l, alt)
+                        col += 1
+                    for name in right_cols:
+                        if name != "Core":
+                            _write_proc_cell(row, col, name,
+                                             entry_r if cs_r else None, alt)
+                        col += 1
+
+                current_row += span
+
+            if show_databar and current_row > 2:
+                _add_databars(all_col_names, current_row - 1)
+
+        elif stack_procs:
+            # Stacked single-column layout with Core cells merged vertically per core.
+            FLAT_ORDER = ["Core", "Usage", "Process", "Parent"]
+            flat_cols  = [c for c in FLAT_ORDER if c.lower() not in ignored]
+            core_col_idx = next((i for i, n in enumerate(flat_cols, 1) if n == "Core"), None)
+
+            _set_header_row(ws, 1, [COL_META[c][0] for c in flat_cols])
+
+            current_row = 2
+            for core_idx, cs in enumerate(sorted_cores):
+                procs   = _get_procs(cs)
+                span    = max(len(procs), 1)
+                end_row = current_row + span - 1
+                alt     = core_idx % 2 == 1
+
+                if core_col_idx is not None:
+                    _write_core_cell(current_row, end_row, core_col_idx, cs)
+
+                for sub_idx in range(span):
+                    row   = current_row + sub_idx
+                    col   = 1
+                    entry = procs[sub_idx] if sub_idx < len(procs) else None
+                    for name in flat_cols:
+                        if name != "Core":
+                            _write_proc_cell(row, col, name, entry, alt)
+                        col += 1
+
+                current_row += span
+
+            if show_databar and current_row > 2:
+                _add_databars(flat_cols, current_row - 1)
+
         else:
-            # Single-column layout for non-HT systems.
+            # Single-column layout for non-HT systems (one row per core).
             SINGLE_ORDER = ["Core", "Usage", "Process", "Parent"]
             col_names = [c for c in SINGLE_ORDER if c.lower() not in ignored]
 
@@ -1828,6 +1876,7 @@ def export_to_excel(
 
             if show_databar and len(sorted_cores) >= 1:
                 _add_databars(col_names, len(sorted_cores) + 1)
+
         _auto_width(ws)
 
     # ── Write snapshot sheets (or single topology sheet) ─────────────────────

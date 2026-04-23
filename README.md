@@ -41,7 +41,7 @@ sudo tidycpu [OPTIONS]
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--live` | `-l` | Live monitoring mode, refreshes every 3 s |
-| `--duration N` | `-d` | Number of iterations for live mode (default: `5`) |
+| `--duration N` | `-d` | Number of seconds for live mode (default: `5`) |
 | `--pid SPEC` | `-p` | Monitor specific process(es) — see below |
 | `--threads` | `-t` | Show top processes and rebalancing plan |
 | `--cpu-freq` | `-f` | Show CPU frequency (min / max / current) |
@@ -51,6 +51,10 @@ sudo tidycpu [OPTIONS]
 | `--export-excel FILE` | | Export report to an Excel file (requires `openpyxl`) |
 | `--ignore-col COLS` | | Hide columns from the topology table (comma-separated, e.g. `Bar,Usage`) |
 | `--specify PARENTS` | | Highlight rows whose parent process matches any of these names (comma-separated) |
+| `--stack-procs` | | Show all processes running on each core, stacked below the core row |
+| `--all` | | Include idle (0 % CPU) processes in the stacked view; use with `--stack-procs` |
+| `--min-usage PCT` | | Only show stacked processes using ≥ PCT% CPU (e.g. `0.5`); default 0.1 without `--all` |
+| `--ignore-process NAMES` | | Exclude processes by name prefix from the stacked view (comma-separated, e.g. `kworker,ksoftirqd`) |
 
 ---
 
@@ -60,11 +64,11 @@ sudo tidycpu [OPTIONS]
 # View CPU topology snapshot (default mode)
 sudo tidycpu
 
-# Live monitor — 5 iterations, 3 s each
+# Live monitor — 5 s, refresh every 3 s
 sudo tidycpu --live
 
-# Live monitor — 10 iterations
-sudo tidycpu --live --duration 10
+# Live monitor — 30 s
+sudo tidycpu --live --duration 30
 
 # Monitor a single process by PID
 sudo tidycpu --pid 1234
@@ -85,14 +89,32 @@ sudo tidycpu --check-pid 1234
 # Include CPU frequency info
 sudo tidycpu --cpu-freq
 
+# Stack all active processes under each core row
+sudo tidycpu --stack-procs
+
+# Stack processes — include even idle ones
+sudo tidycpu --stack-procs --all
+
+# Stack processes — only those using >= 0.5% CPU
+sudo tidycpu --stack-procs --min-usage 0.5
+
+# Stack processes — exclude noisy kernel threads
+sudo tidycpu --stack-procs --ignore-process kworker,ksoftirqd
+
 # Export a live-monitor run to HTML (tabbed per iteration)
 sudo tidycpu --live --duration 5 --export-html /tmp/report.html
 
 # Export to plain text
 sudo tidycpu --live --duration 5 --export-text /tmp/report.txt
 
-# Export to Excel (requires openpyxl — see Dependencies)
-sudo tidycpu --live --duration 5 --export-excel /tmp/report.xlsx
+# Export to Excel — one snapshot, one sheet (requires openpyxl)
+sudo tidycpu --export-excel /tmp/report.xlsx
+
+# Export to Excel with all processes stacked per core
+sudo tidycpu --stack-procs --export-excel /tmp/report.xlsx
+
+# Export live run to Excel — one sheet per iteration
+sudo tidycpu --live --duration 5 --stack-procs --export-excel /tmp/report.xlsx
 
 # Combine: monitor nginx + php-fpm live, export to HTML
 sudo tidycpu --pid "nginx|php-fpm" --duration 10 --export-html /tmp/report.html
@@ -134,6 +156,18 @@ Printed every iteration. On hyper-threaded systems two cores are shown side-by-s
 
 Columns can be hidden with `--ignore-col` and specific parent processes highlighted with `--specify`.
 
+### Stacked Process View (`--stack-procs`)
+
+Adds sub-rows beneath each core row showing every active process on that core, sorted by CPU% descending:
+
+```
+  │ ████████████████░░░░░░ │ 72.3%  │ worker          │ nginx           │ CPU0  │ CPU4  │ ...
+  │                        │  18.1% │ reader          │ nginx           │       │       │ ...
+  │                        │   4.2% │ ksoftirqd/0     │ ksoftirqd/0    │       │       │ ...
+```
+
+Use `--min-usage` to reduce noise (e.g. hide threads below 0.5 %), `--all` to include completely idle threads, and `--ignore-process` to filter out kernel thread families by name prefix.
+
 ### Process / Thread Detail (`--pid`)
 
 When filtering by PID or name, each matched process gets its own section showing all threads, their CPU%, and which cores they run on.
@@ -153,7 +187,7 @@ Live Monitor Mode — Refresh: 3s  Iteration: 2/5
 Each iteration:
 1. **Samples CPU for 0.5 s** invisibly (while the previous frame is still on screen)
 2. **Clears and prints** the new frame instantly
-3. **Waits 2.5 s** so you can read it before the next refresh
+3. **Waits ~2.5 s** so you can read it before the next refresh
 
 This means the screen stays stable and readable for ~2.5 seconds per iteration with no flickering.
 
@@ -170,6 +204,45 @@ The HTML report is a self-contained dark-themed file. When exported from a live-
 ```
 
 Each tab shows the full CPU topology table including the **Process** column.
+
+---
+
+## Excel Export
+
+Requires `openpyxl` (see [Dependencies](#dependencies)).
+
+The Excel report contains a **System Info** sheet followed by one **CPU Topology** sheet per snapshot (or a single sheet for non-live runs).
+
+### Layout
+
+**HT systems** use a dual-column layout matching the live terminal view — the left half of logical cores on the left, the right half on the right, with the Core columns meeting in the centre for easy collision spotting:
+
+```
+Usage (%) │ Process │ Parent │ Core  ║ Core  │ Parent │ Process │ Usage (%)
+──────────┼─────────┼────────┼───────╫───────┼────────┼─────────┼──────────
+    72.3  │ worker  │ nginx  │ CPU0  ║ CPU32 │ irq/.. │ irq/..  │     1.2
+```
+
+**Non-HT systems** use a single-column layout: Core | Usage (%) | Process | Parent.
+
+### Stacked processes in Excel (`--stack-procs`)
+
+When `--stack-procs` is active, each core expands to one row per process. The **Core cell is merged vertically** across all its process rows, keeping the HOT/WARM/COLD colour. On HT systems both sides of a pair span the same number of rows so CPU0 and its HT sibling always sit at the same vertical position:
+
+```
+Usage (%) │ Process         │ Parent    │  Core  ║  Core  │ Parent    │ Process   │ Usage (%)
+──────────┼─────────────────┼───────────┼────────╫────────┼───────────┼───────────┼──────────
+    15.7  │ ksoftirqd/0     │ ksoftirqd │        ║        │ irq/904.. │ irq/904.. │    13.7
+     1.4  │ ksoftirqd/0     │ ksoftirqd │ CPU0   ║ CPU32  │ irq/904.. │ irq/904.. │     1.0
+     1.1  │ irq/886-ice-ens │ irq/886.. │ (green)║ (green)│ ksmd      │ ksmd      │     0.3
+     0.3  │ l1app_trace     │ l1app_main│        ║        │           │           │
+```
+
+Recommended command for a full export matching the live view:
+
+```bash
+sudo tidycpu --live --stack-procs --export-excel /tmp/report.xlsx
+```
 
 ---
 
