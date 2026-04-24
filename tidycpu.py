@@ -1747,13 +1747,70 @@ def export_to_excel(
             if fill_alt:
                 cell.fill = FILL_ALT_ROW
 
-        def _write_core_cell(row_start: int, row_end: int, col: int, cs: CoreStat):
+        def _write_core_cell(row_start: int, row_end: int, col: int, cs: CoreStat,
+                             total_cols: int = 1):
             """Write (and vertically merge) a Core label cell with HOT/WARM/COLD styling."""
             if row_end > row_start:
                 ws.merge_cells(start_row=row_start, start_column=col,
                                end_row=row_end, end_column=col)
             cell = ws.cell(row=row_start, column=col, value=f"CPU{cs.core_id}")
             _apply_cell_style(cell, "core", cs, row_start)
+            # Thick outer border: always thick top/bottom (spans full group); thick
+            # left/right only when this column is the outermost edge of the sheet.
+            thick = Side(style="medium", color="444444")
+            thin  = Side(style="thin",   color="CCCCCC")
+            cell.border = Border(
+                left   = thick if col == 1           else thin,
+                right  = thick if col == total_cols  else thin,
+                top    = thick,
+                bottom = thick,
+            )
+
+        def _apply_group_thick_border(start_row: int, end_row: int, total_cols: int):
+            """Apply a thick outer box to every non-merged cell on the perimeter of a core group."""
+            thick = Side(style="medium", color="444444")
+            thin  = Side(style="thin",   color="CCCCCC")
+            for row in range(start_row, end_row + 1):
+                for col in range(1, total_cols + 1):
+                    top_thick    = row == start_row
+                    bottom_thick = row == end_row
+                    left_thick   = col == 1
+                    right_thick  = col == total_cols
+                    if not (top_thick or bottom_thick or left_thick or right_thick):
+                        continue
+                    cell = ws.cell(row=row, column=col)
+                    try:
+                        cell.border = Border(
+                            left   = thick if left_thick   else thin,
+                            right  = thick if right_thick  else thin,
+                            top    = thick if top_thick    else thin,
+                            bottom = thick if bottom_thick else thin,
+                        )
+                    except AttributeError:
+                        pass  # MergedCell — border is owned by the master cell
+
+        def _merge_parent_cells(procs: list, start_row: int, parent_col: int):
+            """Merge consecutive Parent cells that share the same parent name within a core group."""
+            n = len(procs)
+            i = 0
+            while i < n:
+                entry = procs[i]
+                if entry is None:
+                    i += 1
+                    continue
+                parent_name = entry[1]
+                j = i + 1
+                while j < n:
+                    nxt = procs[j]
+                    if nxt is None or nxt[1] != parent_name:
+                        break
+                    j += 1
+                if j - i > 1:
+                    r1, r2 = start_row + i, start_row + j - 1
+                    ws.merge_cells(start_row=r1, start_column=parent_col,
+                                   end_row=r2, end_column=parent_col)
+                    ws.cell(row=r1, column=parent_col).alignment = _center()
+                i = j
 
         if ht_enabled:
             # Dual-column HT layout with Core columns meeting in the centre.
@@ -1781,6 +1838,17 @@ def export_to_excel(
                         right_core_col = col_idx
                         break
 
+            # Locate Parent column indices for same-parent cell merging
+            left_parent_col = right_parent_col = None
+            _parent_count = 0
+            for col_idx, name in enumerate(all_col_names, 1):
+                if name == "Parent":
+                    if _parent_count == 0:
+                        left_parent_col = col_idx
+                    else:
+                        right_parent_col = col_idx
+                    _parent_count += 1
+
             left_count = (len(sorted_cores) + 1) // 2
             left_half  = sorted_cores[:left_count]
             right_half = sorted_cores[left_count:]
@@ -1797,10 +1865,12 @@ def export_to_excel(
 
                 # Write (merged) Core cells
                 if left_core_col is not None:
-                    _write_core_cell(current_row, end_row, left_core_col, cs_l)
+                    _write_core_cell(current_row, end_row, left_core_col, cs_l,
+                                     total_cols=len(all_col_names))
                 if right_core_col is not None:
                     if cs_r is not None:
-                        _write_core_cell(current_row, end_row, right_core_col, cs_r)
+                        _write_core_cell(current_row, end_row, right_core_col, cs_r,
+                                         total_cols=len(all_col_names))
                     else:
                         for r in range(current_row, end_row + 1):
                             cell = ws.cell(row=r, column=right_core_col, value="")
@@ -1824,6 +1894,11 @@ def export_to_excel(
                                              entry_r if cs_r else None, alt)
                         col += 1
 
+                _apply_group_thick_border(current_row, end_row, len(all_col_names))
+                if left_parent_col is not None:
+                    _merge_parent_cells(procs_l, current_row, left_parent_col)
+                if right_parent_col is not None and cs_r is not None:
+                    _merge_parent_cells(procs_r, current_row, right_parent_col)
                 current_row += span
 
             if show_databar and current_row > 2:
@@ -1833,7 +1908,8 @@ def export_to_excel(
             # Stacked single-column layout with Core cells merged vertically per core.
             FLAT_ORDER = ["Core", "Usage", "Process", "Parent"]
             flat_cols  = [c for c in FLAT_ORDER if c.lower() not in ignored]
-            core_col_idx = next((i for i, n in enumerate(flat_cols, 1) if n == "Core"), None)
+            core_col_idx   = next((i for i, n in enumerate(flat_cols, 1) if n == "Core"),   None)
+            parent_col_idx = next((i for i, n in enumerate(flat_cols, 1) if n == "Parent"), None)
 
             _set_header_row(ws, 1, [COL_META[c][0] for c in flat_cols])
 
@@ -1845,7 +1921,8 @@ def export_to_excel(
                 alt     = core_idx % 2 == 1
 
                 if core_col_idx is not None:
-                    _write_core_cell(current_row, end_row, core_col_idx, cs)
+                    _write_core_cell(current_row, end_row, core_col_idx, cs,
+                                     total_cols=len(flat_cols))
 
                 for sub_idx in range(span):
                     row   = current_row + sub_idx
@@ -1856,6 +1933,9 @@ def export_to_excel(
                             _write_proc_cell(row, col, name, entry, alt)
                         col += 1
 
+                _apply_group_thick_border(current_row, end_row, len(flat_cols))
+                if parent_col_idx is not None:
+                    _merge_parent_cells(procs, current_row, parent_col_idx)
                 current_row += span
 
             if show_databar and current_row > 2:
@@ -1873,6 +1953,7 @@ def export_to_excel(
                     _, fn, kind = COL_META[name]
                     cell = ws.cell(row=row_idx, column=col_idx, value=fn(cs))
                     _apply_cell_style(cell, kind, cs, row_idx)
+                _apply_group_thick_border(row_idx, row_idx, len(col_names))
 
             if show_databar and len(sorted_cores) >= 1:
                 _add_databars(col_names, len(sorted_cores) + 1)
