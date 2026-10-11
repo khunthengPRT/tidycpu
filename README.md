@@ -55,9 +55,9 @@ sudo tidycpu [OPTIONS]
 | `--all` | | Include idle (0 % CPU) processes in the stacked view; use with `--stack-procs` |
 | `--min-usage PCT` | | Only show stacked processes using ≥ PCT% CPU (e.g. `0.5`); default 0.1 without `--all` |
 | `--ignore-process NAMES` | | Exclude processes by name prefix from the stacked view (comma-separated, e.g. `kworker,ksoftirqd`) |
-| `--filter-pgrep PATTERN` | | **Export only.** Keep processes whose thread or parent name matches a pgrep-style regex (e.g. `'nginx\|php-fpm'`) |
-| `--filter-thread LIST` | | **Export only.** Keep only these logical CPUs / hardware threads (cpulist format, e.g. `0-3,8`) |
-| `--filter-pct RANGE` | | **Export only.** Keep rows whose CPU % is in range: `MIN`, `MIN-MAX` or `-MAX` (e.g. `50`, `10-80`) |
+| `--filter-pgrep PATTERN` | | Keep processes whose thread or parent name matches a pgrep-style regex (e.g. `'nginx\|php-fpm'`) |
+| `--filter-thread LIST` | | Keep only these logical CPUs / hardware threads (cpulist format, e.g. `0-3,8`) |
+| `--filter-pct RANGE` | | Keep rows whose CPU % is in range: `MIN`, `MIN-MAX` or `-MAX` (e.g. `50`, `10-80`) |
 
 ---
 
@@ -122,7 +122,7 @@ sudo tidycpu --live --duration 5 --stack-procs --export-excel /tmp/report.xlsx
 # Combine: monitor nginx + php-fpm live, export to HTML
 sudo tidycpu --pid "nginx|php-fpm" --duration 10 --export-html /tmp/report.html
 
-# Export only nginx / php-fpm threads (terminal view stays unfiltered)
+# Show and export only nginx / php-fpm threads
 sudo tidycpu --live --export-excel /tmp/report.xlsx --filter-pgrep 'nginx|php-fpm'
 
 # Export only CPUs 0-3 and 8, and only rows at >= 50 % CPU
@@ -255,9 +255,9 @@ sudo tidycpu --live --stack-procs --export-excel /tmp/report.xlsx
 
 ---
 
-## Export Filters
+## Filters
 
-`--filter-pgrep`, `--filter-thread` and `--filter-pct` are applied **after collection, to the exported report only** (HTML, text and Excel). The terminal view always shows everything. Filters combine with AND; cores with nothing left are dropped from the export, and HT pairs stay aligned by core ID.
+`--filter-pgrep`, `--filter-thread` and `--filter-pct` are applied after collection to **both the terminal view and every export** (HTML, text and Excel). Filters combine with AND; cores with nothing left are dropped, and HT pairs stay aligned by core ID. Rebalancing (`--threads`) still considers all cores.
 
 | Filter | Matches against |
 |--------|-----------------|
@@ -265,7 +265,7 @@ sudo tidycpu --live --stack-procs --export-excel /tmp/report.xlsx
 | `--filter-thread LIST` | Logical CPU (hardware thread) ID, i.e. the `CPUn` in the Core column. |
 | `--filter-pct RANGE` | The Usage column as exported: per-process CPU % when per-process rows are present (`--stack-procs` or `--filter-pgrep`), otherwise the core's usage %. Bounds are inclusive. |
 
-The active filter is recorded in the report (HTML/text summary line, Excel *System Info* sheet).
+The active filter is shown below the terminal table and recorded in each report (HTML/text summary line, Excel *System Info* sheet).
 
 ```bash
 sudo tidycpu --live -d 10 --stack-procs --export-excel /tmp/r.xlsx \

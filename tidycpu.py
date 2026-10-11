@@ -107,8 +107,8 @@ class Snapshot:
     processes:    list[ProcessInfo]
 
 @dataclass
-class ExportFilter:
-    """Filters applied to exported reports only (the terminal view is unaffected)."""
+class ViewFilter:
+    """Row filters applied to the terminal view and to every export."""
     pgrep:   Optional[str] = None          # regex matched against thread / parent name
     cpus:    Optional[list[int]] = None    # logical CPU (hardware thread) numbers to keep
     pct_min: Optional[float] = None        # inclusive lower bound for CPU %
@@ -917,8 +917,10 @@ def _render_stacked_cell(col: str, proc_entry: Optional[tuple],
 def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat],
                    ignore_cols: Optional[list[str]] = None,
                    specify_parents: Optional[list[str]] = None,
-                   stack_procs: bool = False):
+                   stack_procs: bool = False,
+                   view_filter: Optional[ViewFilter] = None):
     """Print CPU topology table — two-column for HT servers, single-column otherwise."""
+    core_stats = apply_view_filter(core_stats, view_filter)
     ignored = {c.lower() for c in (ignore_cols or [])}
     vis_left  = [c for c in _LEFT_ORDER  if c.lower() not in ignored]
     vis_right = [c for c in _RIGHT_ORDER if c.lower() not in ignored]
@@ -950,6 +952,8 @@ def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat],
         for i in range(left_count):
             cs_l = stats_map.get(i)
             cs_r = stats_map.get(i + left_count)
+            if cs_l is None and cs_r is None:
+                continue   # both siblings filtered out
             hl_l = bool(spec_set and cs_l and cs_l.top_parent in spec_set)
             hl_r = bool(spec_set and cs_r and cs_r.top_parent in spec_set)
             cells = (
@@ -978,6 +982,8 @@ def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat],
 
         for i in range(total_cores):
             cs = stats_map.get(i)
+            if cs is None:
+                continue   # filtered out
             hl = bool(spec_set and cs and cs.top_parent in spec_set)
             cells = [_render_cell(c, cs, is_right=False, hl=hl) for c in vis_left]
             print("  " + _tbl_row(cells))
@@ -995,6 +1001,9 @@ def print_topology(topology: dict[int, CPUTopology], core_stats: list[CoreStat],
 
     if spec_set:
         print(f"\n  {C.BOLD}Focused on:{C.RESET} {', '.join(sorted(spec_set))}")
+    if view_filter and view_filter.active():
+        print(f"\n  {C.BOLD}Filter:{C.RESET} {view_filter.describe()} "
+              f"{C.DIM}— {len(core_stats)} core(s) shown{C.RESET}")
 
     print(f"\n  Summary: {C.RED}●{C.RESET} {hot} Hot  "
           f"{C.YELLOW}●{C.RESET} {warm} Warm  "
@@ -1041,7 +1050,7 @@ def _fetch_process_info(pid: int, num_cores: int) -> Optional[ProcessInfo]:
         threads=threads
     )
 
-def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Optional[list[int]] = None, show_cpu_freq: bool = False, export_html: Optional[str] = None, export_text: Optional[str] = None, export_excel: Optional[str] = None, sysinfo: Optional[SystemInfo] = None, topology_data: Optional[dict] = None, ignore_cols: Optional[list[str]] = None, specify_parents: Optional[list[str]] = None, stack_procs: bool = False, min_usage: float = 0.0, ignore_procs: Optional[list[str]] = None, export_filter: Optional[ExportFilter] = None):
+def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Optional[list[int]] = None, show_cpu_freq: bool = False, export_html: Optional[str] = None, export_text: Optional[str] = None, export_excel: Optional[str] = None, sysinfo: Optional[SystemInfo] = None, topology_data: Optional[dict] = None, ignore_cols: Optional[list[str]] = None, specify_parents: Optional[list[str]] = None, stack_procs: bool = False, min_usage: float = 0.0, ignore_procs: Optional[list[str]] = None, view_filter: Optional[ViewFilter] = None):
     """
     Live monitoring mode - refresh stats every interval_ms for duration_sec iterations.
     CPU is sampled for SAMPLE_MS (fast), then the screen is shown for the remaining
@@ -1057,8 +1066,8 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
 
     iterations = duration_sec
     snapshots = [] if (export_html or export_text or export_excel) else None
-    # A process-name export filter needs every thread per core, not just the busiest one
-    collect_procs = stack_procs or bool(export_filter and export_filter.pgrep is not None)
+    # A process-name filter needs every thread per core, not just the busiest one
+    collect_procs = stack_procs or bool(view_filter and view_filter.pgrep is not None)
 
     for i in range(iterations):
         # ── 1. Sample CPU (happens invisibly, screen still showing previous frame) ──
@@ -1088,7 +1097,8 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
         print_topology(topology, core_stats,
                        ignore_cols=ignore_cols,
                        specify_parents=specify_parents,
-                       stack_procs=stack_procs)
+                       stack_procs=stack_procs,
+                       view_filter=view_filter)
 
         if filter_pids:
             label = " | ".join(str(p) for p in filter_pids)
@@ -1121,7 +1131,7 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
             try:
                 filename = export_to_html(sysinfo, topology, core_stats, [], export_html,
                                           snapshots=snapshots, ignore_cols=ignore_cols,
-                                          export_filter=export_filter)
+                                          view_filter=view_filter)
                 print(f"  {C.GREEN}✔{C.RESET}  HTML report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
             except Exception as e:
                 print(f"  {C.RED}✘{C.RESET}  HTML export failed: {e}\n")
@@ -1130,7 +1140,7 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
             try:
                 filename = export_to_text(sysinfo, topology, core_stats, [], export_text,
                                           snapshots=snapshots, ignore_cols=ignore_cols,
-                                          export_filter=export_filter)
+                                          view_filter=view_filter)
                 print(f"  {C.GREEN}✔{C.RESET}  Text report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
             except Exception as e:
                 print(f"  {C.RED}✘{C.RESET}  Text export failed: {e}\n")
@@ -1140,7 +1150,7 @@ def live_monitor(duration_sec: int = 5, interval_ms: int = 3000, filter_pids: Op
                 filename = export_to_excel(sysinfo, topology, core_stats, [], export_excel,
                                            snapshots=snapshots, ignore_cols=ignore_cols,
                                            stack_procs=collect_procs,
-                                           export_filter=export_filter)
+                                           view_filter=view_filter)
                 print(f"  {C.GREEN}✔{C.RESET}  Excel report with {len(snapshots)} snapshots exported to: {C.CYAN}{filename}{C.RESET}\n")
             except Exception as e:
                 print(f"  {C.RED}✘{C.RESET}  Excel export failed: {e}\n")
@@ -1230,9 +1240,9 @@ def parse_pct_range(spec: str) -> tuple[Optional[float], Optional[float]]:
         raise argparse.ArgumentTypeError(
             f"invalid percent range '{spec}' (use MIN, MIN-MAX or -MAX)")
 
-def apply_export_filter(core_stats: list[CoreStat], flt: Optional[ExportFilter]) -> list[CoreStat]:
+def apply_view_filter(core_stats: list[CoreStat], flt: Optional[ViewFilter]) -> list[CoreStat]:
     """
-    Return a filtered copy of core_stats for export. Cores with nothing left are dropped.
+    Return a filtered copy of core_stats for display/export. Cores with nothing left are dropped.
     - cpus:  keep only these logical CPUs (hardware threads).
     - pgrep: keep processes whose thread or parent name matches the regex.
     - pct:   per-process CPU% when per-process rows exist (all_procs), else core usage %.
@@ -1270,12 +1280,12 @@ def apply_export_filter(core_stats: list[CoreStat], flt: Optional[ExportFilter])
     return out
 
 def _filter_for_export(core_stats, snapshots, flt):
-    """Apply an ExportFilter to a single snapshot and/or a snapshot list."""
+    """Apply an ViewFilter to a single snapshot and/or a snapshot list."""
     if flt is None or not flt.active():
         return core_stats, snapshots, ""
-    core_stats = apply_export_filter(core_stats, flt)
+    core_stats = apply_view_filter(core_stats, flt)
     if snapshots:
-        snapshots = [replace(sn, core_stats=apply_export_filter(sn.core_stats, flt))
+        snapshots = [replace(sn, core_stats=apply_view_filter(sn.core_stats, flt))
                      for sn in snapshots]
     return core_stats, snapshots, flt.describe()
 
@@ -1286,10 +1296,10 @@ def export_to_html(
     processes: list[ProcessInfo],
     filename: str = "tidycpu_report.html",
     snapshots: Optional[list[Snapshot]] = None,
-    ignore_cols: Optional[list[str]] = None,    export_filter: Optional[ExportFilter] = None,
+    ignore_cols: Optional[list[str]] = None,    view_filter: Optional[ViewFilter] = None,
 ):
     """Export current state to HTML file with styling."""
-    core_stats, snapshots, filter_desc = _filter_for_export(core_stats, snapshots, export_filter)
+    core_stats, snapshots, filter_desc = _filter_for_export(core_stats, snapshots, view_filter)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     html = f"""<!DOCTYPE html>
@@ -1528,10 +1538,10 @@ def export_to_text(
     processes: list[ProcessInfo],
     filename: str = "tidycpu_report.txt",
     snapshots: Optional[list[Snapshot]] = None,
-    ignore_cols: Optional[list[str]] = None,    export_filter: Optional[ExportFilter] = None,
+    ignore_cols: Optional[list[str]] = None,    view_filter: Optional[ViewFilter] = None,
 ):
     """Export current state to text file."""
-    core_stats, snapshots, filter_desc = _filter_for_export(core_stats, snapshots, export_filter)
+    core_stats, snapshots, filter_desc = _filter_for_export(core_stats, snapshots, view_filter)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     output = []
@@ -1671,10 +1681,10 @@ def export_to_excel(
     snapshots: Optional[list[Snapshot]] = None,
     ignore_cols: Optional[list[str]] = None,
     stack_procs: bool = False,
-    export_filter: Optional[ExportFilter] = None,
+    view_filter: Optional[ViewFilter] = None,
 ):
     """Export report to an Excel (.xlsx) file using openpyxl."""
-    core_stats, snapshots, filter_desc = _filter_for_export(core_stats, snapshots, export_filter)
+    core_stats, snapshots, filter_desc = _filter_for_export(core_stats, snapshots, view_filter)
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -1782,7 +1792,7 @@ def export_to_excel(
                                f"{sysinfo.cpu_freq_min:.0f} – {sysinfo.cpu_freq_max:.0f} MHz"))
         info_rows.append(("CPU Freq Current", f"{sysinfo.cpu_freq_cur:.0f} MHz"))
     if filter_desc:
-        info_rows.append(("Export Filter", filter_desc))
+        info_rows.append(("Filter", filter_desc))
 
     _set_header_row(ws_info, 4, ["Property", "Value"])
     for r_idx, (prop, val) in enumerate(info_rows, start=5):
@@ -2094,11 +2104,11 @@ Examples:
         default=None, metavar="NAMES",
         help="Comma-separated process name prefixes to exclude from stacked view (e.g. kworker,ksoftirqd)")
     parser.add_argument("--filter-pgrep", type=str, default=None, metavar="PATTERN",
-        help="Export only: keep processes whose thread/parent name matches this pgrep-style regex (e.g. 'nginx|php-fpm')")
+        help="Keep processes whose thread/parent name matches this pgrep-style regex (e.g. 'nginx|php-fpm')")
     parser.add_argument("--filter-thread", type=str, default=None, metavar="LIST",
-        help="Export only: keep these logical CPUs / hardware threads (e.g. 0-3,8)")
+        help="Keep only these logical CPUs / hardware threads (e.g. 0-3,8)")
     parser.add_argument("--filter-pct", type=parse_pct_range, default=None, metavar="RANGE",
-        help="Export only: keep rows with CPU%% in range: MIN, MIN-MAX or -MAX (e.g. 50, 10-80)")
+        help="Keep rows with CPU%% in range: MIN, MIN-MAX or -MAX (e.g. 50, 10-80)")
 
     args = parser.parse_args()
 
@@ -2116,11 +2126,8 @@ Examples:
         if not filter_cpus:
             parser.error(f"--filter-thread: invalid CPU list '{args.filter_thread}' (e.g. 0-3,8)")
     pct_min, pct_max = args.filter_pct if args.filter_pct else (None, None)
-    export_filter = ExportFilter(pgrep=args.filter_pgrep, cpus=filter_cpus,
+    view_filter = ViewFilter(pgrep=args.filter_pgrep, cpus=filter_cpus,
                                  pct_min=pct_min, pct_max=pct_max)
-    if export_filter.active() and not (args.export_html or args.export_text or args.export_excel):
-        print(f"  {C.YELLOW}⚠  --filter-* options only apply to exports "
-              f"(--export-html / --export-text / --export-excel).{C.RESET}")
 
     # Resolve effective min_usage for --stack-procs:
     #   --all forces 0.0 (show every process, even idle)
@@ -2243,7 +2250,7 @@ Examples:
                 stack_procs=args.stack_procs,
                 min_usage=effective_min_usage,
                 ignore_procs=args.ignore_process,
-                export_filter=export_filter,
+                view_filter=view_filter,
             )
         except KeyboardInterrupt:
             print(f"\n\n  {C.YELLOW}Monitoring interrupted.{C.RESET}\n")
@@ -2261,7 +2268,8 @@ Examples:
     print_topology(topology, core_stats,
                    ignore_cols=args.ignore_col,
                    specify_parents=args.specify,
-                   stack_procs=args.stack_procs)
+                   stack_procs=args.stack_procs,
+                   view_filter=view_filter)
 
     processes = []
 
@@ -2276,7 +2284,7 @@ Examples:
                 processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
             filename = export_to_html(sysinfo, topology, core_stats, processes, args.export_html,
                                       ignore_cols=args.ignore_col,
-                                      export_filter=export_filter)
+                                      view_filter=view_filter)
             print(f"\n  {C.GREEN}✔{C.RESET}  HTML report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
             print(f"\n  {C.RED}✘{C.RESET}  HTML export failed: {e}")
@@ -2287,7 +2295,7 @@ Examples:
                 processes = get_top_processes(n=5, num_cores=num_cores, with_threads=False)
             filename = export_to_text(sysinfo, topology, core_stats, processes, args.export_text,
                                       ignore_cols=args.ignore_col,
-                                      export_filter=export_filter)
+                                      view_filter=view_filter)
             print(f"\n  {C.GREEN}✔{C.RESET}  Text report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
             print(f"\n  {C.RED}✘{C.RESET}  Text export failed: {e}")
@@ -2299,7 +2307,7 @@ Examples:
             filename = export_to_excel(sysinfo, topology, core_stats, processes, args.export_excel,
                                        ignore_cols=args.ignore_col,
                                        stack_procs=collect_procs,
-                                       export_filter=export_filter)
+                                       view_filter=view_filter)
             print(f"\n  {C.GREEN}✔{C.RESET}  Excel report exported to: {C.CYAN}{filename}{C.RESET}")
         except Exception as e:
             print(f"\n  {C.RED}✘{C.RESET}  Excel export failed: {e}")
